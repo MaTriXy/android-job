@@ -62,25 +62,27 @@ public class PlatformAlarmService extends IntentService {
         }
 
         int jobId = intent.getIntExtra(PlatformAlarmReceiver.EXTRA_JOB_ID, -1);
-
         final JobProxy.Common common = new JobProxy.Common(this, jobId);
 
-        final JobRequest request = common.getPendingRequest();
-        if (request != null) {
-            // parallel execution
-            EXECUTOR_SERVICE.execute(new Runnable() {
-                @Override
-                public void run() {
-                    common.executeJobRequest(request);
-
-                    // call here, our own wake lock could be acquired too late
-                    try {
-                        PlatformAlarmReceiver.completeWakefulIntent(intent);
-                    } catch (Exception e) {
-                        // could end in a NPE if the intent has no wake lock
-                    }
-                }
-            });
+        // create the JobManager. Seeing sometimes exceptions, that it wasn't created, yet.
+        final JobRequest request = common.getPendingRequest(true);
+        if (request == null) {
+            return;
         }
+
+        // parallel execution
+        EXECUTOR_SERVICE.execute(new Runnable() {
+            @Override
+            public void run() {
+                common.executeJobRequest(request);
+
+                // call here, our own wake lock could be acquired too late
+                try {
+                    PlatformAlarmReceiver.completeWakefulIntent(intent);
+                } catch (Exception e) {
+                    // could end in a NPE if the intent has no wake lock
+                }
+            }
+        });
     }
 }

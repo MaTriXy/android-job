@@ -1,29 +1,26 @@
-Android-Job
-============
+# Android-Job
 
-An utility library for Android to run jobs delayed in the background. Depending on the Android version either the `JobScheduler`, `GcmNetworkManager` or `AlarmManager` is getting used. You can find out in [this blog post][1] why you should prefer this library than each separate API.
+An utility library for Android to run jobs delayed in the background. Depending on the Android version either the `JobScheduler`, `GcmNetworkManager` or `AlarmManager` is getting used. You can find out in [this blog post](https://blog.evernote.com/tech/2015/10/26/unified-job-library-android/) or in [these slides](https://speakerdeck.com/vrallev/scheduling-background-job-on-android-at-the-right-time) why you should prefer this library than each separate API. All features from Android Nougat are backward compatible.
 
-Download
---------
+## Download
 
-Download [the latest version][2] or grab via Gradle:
+Download [the latest version](http://search.maven.org/#search|gav|1|g:"com.evernote"%20AND%20a:"android-job") or grab via Gradle:
 
 ```groovy
 dependencies {
-    compile 'com.evernote:android-job:1.0.5'
+    compile 'com.evernote:android-job:1.1.4'
 }
 ```
 
-If you didn't turn off the manifest merger from the Gradle build tools, then no further step is required to setup the library. Otherwise you manually need to add the permissions and services like in this [AndroidManifest][3].
+If you didn't turn off the manifest merger from the Gradle build tools, then no further step is required to setup the library. Otherwise you manually need to add the permissions and services like in this [AndroidManifest](library/src/main/AndroidManifest.xml).
 
-You can read the [JavaDoc here][4].
+You can read the [JavaDoc here](https://evernote.github.io/android-job/javadoc/).
 
-Usage
------
+## Usage
 
 The class `JobManager` serves as entry point. Your jobs need to extend the class `Job`. Create a `JobRequest` with the corresponding builder class and schedule this request with the `JobManager`.
 
-Before you can use the `JobManager` you must initialize the singleton. You need to provide a `Context` and add a `JobCreator` implementation after that. The `JobCreator` maps a job tag to a specific job class. It's recommend to initialize the `JobManager` in the `onCreate()` method of your `Application` object.
+Before you can use the `JobManager` you must initialize the singleton. You need to provide a `Context` and add a `JobCreator` implementation after that. The `JobCreator` maps a job tag to a specific job class. It's recommend to initialize the `JobManager` in the `onCreate()` method of your `Application` object, but there is [an alternative](FAQ.md#i-cannot-override-the-application-class-how-can-i-add-my-jobcreator), if you don't have access to the `Application` class.
 
 ```java
 public class App extends Application {
@@ -42,8 +39,8 @@ public class DemoJobCreator implements JobCreator {
     @Override
     public Job create(String tag) {
         switch (tag) {
-            case DemoJob.TAG:
-                return new DemoJob();
+            case DemoSyncJob.TAG:
+                return new DemoSyncJob();
             default:
                 return null;
         }
@@ -54,28 +51,27 @@ public class DemoJobCreator implements JobCreator {
 After that you can start scheduling jobs.
 
 ```java
-public class DemoJob extends Job {
+public class DemoSyncJob extends Job {
 
     public static final String TAG = "job_demo_tag";
 
     @Override
     @NonNull
     protected Result onRunJob(Params params) {
-        // run your job
+        // run your job here
         return Result.SUCCESS;
     }
-}
 
-private void scheduleJob() {
-    new JobRequest.Builder(DemoJob.TAG)
-            .setExecutionWindow(30_000L, 40_000L)
-            .build()
-            .schedule();
+    public static void scheduleJob() {
+        new JobRequest.Builder(DemoSyncJob.TAG)
+                .setExecutionWindow(30_000L, 40_000L)
+                .build()
+                .schedule();
+    }
 }
 ```
 
-Advanced
---------
+## Advanced
 
 The `JobRequest.Builder` class has many extra options, e.g. you can specify a required network connection, make the job periodic, pass some extras with a bundle, restore the job after a reboot or run the job at an exact time.
 
@@ -86,7 +82,7 @@ private void scheduleAdvancedJob() {
     PersistableBundleCompat extras = new PersistableBundleCompat();
     extras.putString("key", "Hello world");
 
-    int jobId = new JobRequest.Builder(DemoJob.TAG)
+    int jobId = new JobRequest.Builder(DemoSyncJob.TAG)
             .setExecutionWindow(30_000L, 40_000L)
             .setBackoffCriteria(5_000L, JobRequest.BackoffPolicy.EXPONENTIAL)
             .setRequiresCharging(true)
@@ -101,15 +97,15 @@ private void scheduleAdvancedJob() {
 }
 
 private void schedulePeriodicJob() {
-    int jobId = new JobRequest.Builder(DemoJob.TAG)
-            .setPeriodic(60_000L)
+    int jobId = new JobRequest.Builder(DemoSyncJob.TAG)
+            .setPeriodic(TimeUnit.MINUTES.toMillis(15), TimeUnit.MINUTES.toMillis(5))
             .setPersisted(true)
             .build()
             .schedule();
 }
 
 private void scheduleExactJob() {
-    int jobId = new JobRequest.Builder(DemoJob.class)
+    int jobId = new JobRequest.Builder(DemoSyncJob.class)
             .setExact(20_000L)
             .setPersisted(true)
             .build()
@@ -117,7 +113,7 @@ private void scheduleExactJob() {
 }
 
 private void cancelJob(int jobId) {
-    JobManger.instance().cancel(jobId);
+    JobManager.instance().cancel(jobId);
 }
 ```
 
@@ -158,35 +154,17 @@ And then referring to it in your application tag in `AndroidManifest.xml`:
 <application ...  android:fullBackupContent="@xml/backup_config">
 ```
 
-#### Using the GcmNetworkManager
-
-By default the API for the `GcmNetworkManager` is disabled. In order to use it for pre Lollipop devices you must add the GCM dependency in your `build.gradle` and then add the service in your `AndroidManifest.xml` manually.
-
-```groovy
-dependencies {
-    compile 'com.google.android.gms:play-services-gcm:8.4.0' // or newer
-}
-```
-
-```xml
-<service
-    android:name="com.evernote.android.job.gcm.PlatformGcmService"
-    android:exported="true"
-    android:permission="com.google.android.gms.permission.BIND_NETWORK_TASK_SERVICE">
-    <intent-filter>
-        <action android:name="com.google.android.gms.gcm.ACTION_TASK_READY"/>
-    </intent-filter>
-</service>
-```
-
 #### Proguard
 
-The library doesn't use reflection, but it relies on two `Service`s and two `BroadcastReceiver`s. In order to avoid any issues, you shouldn't obfuscate those four classes. The library bundles its own Proguard config and you don't need to do anything, but just in case you can add [these rules][5] in your configuration.  
+The library doesn't use reflection, but it relies on two `Service`s and two `BroadcastReceiver`s. In order to avoid any issues, you shouldn't obfuscate those four classes. The library bundles its own Proguard config and you don't need to do anything, but just in case you can add [these rules](library/proguard.txt) in your configuration.
 
-License
--------
+## FAQ
 
-    Copyright (c) 2007-2015 by Evernote Corporation, All rights reserved.
+See [here](FAQ.md).
+
+## License
+
+    Copyright (c) 2007-2016 by Evernote Corporation, All rights reserved.
 
     Use of the source code and binary libraries included in this package
     is permitted under the following terms:
@@ -211,9 +189,3 @@ License
     THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
     THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-[1]: https://blog.evernote.com/tech/2015/10/26/unified-job-library-android/
-[2]: http://search.maven.org/#search|gav|1|g:"com.evernote"%20AND%20a:"android-job"
-[3]: https://github.com/evernote/android-job/blob/master/library/src/main/AndroidManifest.xml
-[4]: http://evernote.github.io/android-job/javadoc/
-[5]: https://github.com/evernote/android-job/blob/master/library/proguard.txt

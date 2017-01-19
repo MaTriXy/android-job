@@ -25,10 +25,15 @@
  */
 package com.evernote.android.job;
 
+import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.app.Application;
 import android.app.job.JobScheduler;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.ResolveInfo;
+import android.os.Build;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.support.annotation.NonNull;
@@ -45,6 +50,7 @@ import net.vrallev.android.cat.Cat;
 import net.vrallev.android.cat.CatGlobal;
 import net.vrallev.android.cat.CatLog;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -79,9 +85,10 @@ import java.util.concurrent.TimeUnit;
 @SuppressWarnings("unused")
 public final class JobManager {
 
-    private static final String PACKAGE = JobManager.class.getPackage().getName();
+    private static final Package PACKAGE = JobManager.class.getPackage();
     private static final CatLog CAT = new JobCat("JobManager");
 
+    @SuppressLint("StaticFieldLeak")
     private static volatile JobManager instance;
 
     /**
@@ -91,12 +98,16 @@ public final class JobManager {
      * @param context Any {@link Context} to instantiate the singleton object.
      * @return The new or existing singleton object.
      */
-    public static JobManager create(Context context) {
+    public static JobManager create(@NonNull Context context) {
         if (instance == null) {
             synchronized (JobManager.class) {
                 if (instance == null) {
                     JobPreconditions.checkNotNull(context, "Context cannot be null");
-                    CatGlobal.setDefaultCatLogPackage(PACKAGE, new JobCat());
+
+                    if (PACKAGE != null) {
+                        // package can be null when class is repackaged, then ignore this
+                        CatGlobal.setDefaultCatLogPackage(PACKAGE.getName(), new JobCat());
+                    }
 
                     if (context.getApplicationContext() != null) {
                         // could be null in unit tests
@@ -111,6 +122,8 @@ public final class JobManager {
                     if (!JobUtil.hasBootPermission(context)) {
                         Cat.w("No boot permission");
                     }
+
+                    sendAddJobCreatorIntent(context);
                 }
             }
         }
@@ -122,7 +135,7 @@ public final class JobManager {
      * Initializes the singleton. It's necessary to call this function before using the {@code JobManager}.
      * Calling it multiple times has not effect.
      *
-     * @param context Any {@link Context} to instantiate the singleton object.
+     * @param context    Any {@link Context} to instantiate the singleton object.
      * @param jobCreator The mapping between a specific job tag and the job class.
      * @return The new or existing singleton object.
      * @deprecated Use {@link #create(Context)} instead and call {@link #addJobCreator(JobCreator)} after that.
@@ -165,6 +178,7 @@ public final class JobManager {
     private final JobCreatorHolder mJobCreatorHolder;
     private final JobStorage mJobStorage;
     private final JobExecutor mJobExecutor;
+    private final Config mConfig;
 
     private JobApi mApi;
 
@@ -173,10 +187,18 @@ public final class JobManager {
         mJobCreatorHolder = new JobCreatorHolder();
         mJobStorage = new JobStorage(context);
         mJobExecutor = new JobExecutor();
+        mConfig = new Config();
 
-        setJobProxy(JobApi.getDefault(mContext));
+        setJobProxy(JobApi.getDefault(mContext, mConfig.isGcmApiEnabled()));
 
         rescheduleTasksIfNecessary();
+    }
+
+    /**
+     * @return The current configuration for the job manager.
+     */
+    public Config getConfig() {
+        return mConfig;
     }
 
     protected void setJobProxy(JobApi api) {
@@ -191,7 +213,7 @@ public final class JobManager {
      *
      * @param request The {@link JobRequest} which will be run in the future.
      */
-    public void schedule(JobRequest request) {
+    public void schedule(@NonNull JobRequest request) {
         if (mJobCreatorHolder.isEmpty()) {
             CAT.w("you haven't registered a JobCreator with addJobCreator(), it's likely that your job never will be executed");
         }
@@ -200,12 +222,28 @@ public final class JobManager {
             cancelAllForTag(request.getTag());
         }
 
+        JobProxy.Common.cleanUpOrphanedJob(mContext, request.getJobId());
+
+        JobApi jobApi = request.getJobApi();
+        boolean periodic = request.isPeriodic();
+        boolean flexSupport = periodic && jobApi.isFlexSupport() && request.getFlexMs() < request.getIntervalMs();
+
+        if (jobApi == JobApi.GCM && !mConfig.isGcmApiEnabled()) {
+            // shouldn't happen
+            CAT.w("GCM API disabled, but used nonetheless");
+        }
+
         request.setScheduledAt(System.currentTimeMillis());
+        request.setFlexSupport(flexSupport);
         mJobStorage.put(request);
 
-        JobProxy proxy = getJobProxy(request);
-        if (request.isPeriodic()) {
-            proxy.plantPeriodic(request);
+        JobProxy proxy = getJobProxy(jobApi);
+        if (periodic) {
+            if (flexSupport) {
+                proxy.plantPeriodicFlexSupport(request);
+            } else {
+                proxy.plantPeriodic(request);
+            }
         } else {
             proxy.plantOneOff(request);
         }
@@ -216,7 +254,16 @@ public final class JobManager {
      * @return The {@link JobRequest} if it's pending or {@code null} otherwise.
      */
     public JobRequest getJobRequest(int jobId) {
-        return mJobStorage.get(jobId);
+        return getJobRequest(jobId, false);
+    }
+
+    /*package*/ JobRequest getJobRequest(int jobId, boolean includeTransient) {
+        JobRequest jobRequest = mJobStorage.get(jobId);
+        if (!includeTransient && jobRequest != null && jobRequest.isTransient()) {
+            return null;
+        } else {
+            return jobRequest;
+        }
     }
 
     /**
@@ -227,7 +274,7 @@ public final class JobManager {
      */
     @NonNull
     public Set<JobRequest> getAllJobRequests() {
-        return mJobStorage.getAllJobRequests();
+        return mJobStorage.getAllJobRequests(null, false);
     }
 
     /**
@@ -237,7 +284,7 @@ public final class JobManager {
      * direct effects to the actual backing store.
      */
     public Set<JobRequest> getAllJobRequestsForTag(@NonNull String tag) {
-        return mJobStorage.getAllJobRequestsForTag(tag);
+        return mJobStorage.getAllJobRequests(tag, false);
     }
 
     /**
@@ -308,7 +355,9 @@ public final class JobManager {
      */
     public boolean cancel(int jobId) {
         // call both methods
-        return cancelInner(getJobRequest(jobId)) | cancelInner(getJob(jobId));
+        boolean result = cancelInner(getJobRequest(jobId, true)) | cancelInner(getJob(jobId));
+        JobProxy.Common.cleanUpOrphanedJob(mContext, jobId); // do this as well, just in case
+        return result;
     }
 
     /**
@@ -333,7 +382,7 @@ public final class JobManager {
     private boolean cancelInner(@Nullable JobRequest request) {
         if (request != null) {
             CAT.i("Found pending job %s, canceling", request);
-            getJobProxy(request).cancel(request);
+            getJobProxy(request).cancel(request.getJobId());
             getJobStorage().remove(request);
             return true;
         } else {
@@ -354,7 +403,7 @@ public final class JobManager {
     private int cancelAllInner(@Nullable String tag) {
         int canceled = 0;
 
-        Set<JobRequest> requests = TextUtils.isEmpty(tag) ? getAllJobRequests() : getAllJobRequestsForTag(tag);
+        Set<JobRequest> requests = mJobStorage.getAllJobRequests(tag, true);
         for (JobRequest request : requests) {
             if (cancelInner(request)) {
                 canceled++;
@@ -374,9 +423,11 @@ public final class JobManager {
      * Global switch to enable or disable logging.
      *
      * @param verbose Whether or not to print log messages.
+     * @deprecated Use {@link Config#setVerbose(boolean)} instead.
      */
+    @Deprecated
     public void setVerbose(boolean verbose) {
-        CatGlobal.setPackageEnabled(PACKAGE, verbose);
+        mConfig.setVerbose(verbose);
     }
 
     /**
@@ -414,17 +465,22 @@ public final class JobManager {
         return mContext;
     }
 
+    /*package*/ void destroy() {
+        synchronized (JobManager.class) {
+            instance = null;
+        }
+    }
+
     private JobProxy getJobProxy(JobRequest request) {
-        return request.getJobApi().getCachedProxy(mContext);
+        return getJobProxy(request.getJobApi());
+    }
+
+    private JobProxy getJobProxy(JobApi api) {
+        return api.getCachedProxy(mContext);
     }
 
     private void rescheduleTasksIfNecessary() {
-        PowerManager powerManager = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
-        final PowerManager.WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, JobManager.class.getName());
-        if (JobUtil.hasWakeLockPermission(mContext)) {
-            wakeLock.setReferenceCounted(false);
-            wakeLock.acquire(TimeUnit.SECONDS.toMillis(3));
-        }
+        final PowerManager.WakeLock wakeLock = WakeLockUtil.acquireWakeLock(mContext, JobManager.class.getName(), TimeUnit.MINUTES.toMillis(1));
 
         new Thread() {
             @Override
@@ -438,11 +494,19 @@ public final class JobManager {
                      */
                     SystemClock.sleep(10_000L);
 
-                    Set<JobRequest> requests = JobManager.instance().getAllJobRequests();
+                    Set<JobRequest> requests = mJobStorage.getAllJobRequests(null, true);
 
                     int rescheduledCount = 0;
                     for (JobRequest request : requests) {
-                        if (!getJobProxy(request).isPlatformJobScheduled(request)) {
+                        boolean reschedule;
+                        if (request.isTransient()) {
+                            Job job = getJob(request.getJobId());
+                            reschedule = job == null;
+                        } else {
+                            reschedule = !getJobProxy(request).isPlatformJobScheduled(request);
+                        }
+
+                        if (reschedule) {
                             // update execution window
                             request.cancelAndEdit()
                                     .build()
@@ -455,16 +519,126 @@ public final class JobManager {
                     CAT.d("Reschedule %d jobs of %d jobs", rescheduledCount, requests.size());
 
                 } finally {
-                    try {
-                        if (wakeLock.isHeld()) {
-                            wakeLock.release();
-                        }
-                    } catch (Exception e) {
-                        // just to make sure if the PowerManager crashes while acquiring a wake lock
-                        CAT.e(e);
-                    }
+                    WakeLockUtil.releaseWakeLock(wakeLock);
                 }
             }
         }.start();
+    }
+
+    public final class Config {
+
+        private boolean mVerbose;
+        private boolean mGcmEnabled;
+        private boolean mAllowSmallerIntervals;
+
+        private Config() {
+            mVerbose = true;
+            mGcmEnabled = true;
+            mAllowSmallerIntervals = false;
+        }
+
+        /**
+         * @return Whether logging is enabled for this library. The default value is {@code true}.
+         */
+        public boolean isVerbose() {
+            return mVerbose;
+        }
+
+        /**
+         * Global switch to enable or disable logging.
+         *
+         * @param verbose Whether or not to print all log messages. The default value is {@code true}.
+         */
+        public void setVerbose(boolean verbose) {
+            if (mVerbose != verbose && PACKAGE != null) {
+                mVerbose = verbose;
+                CatGlobal.setPackageEnabled(PACKAGE.getName(), verbose);
+            }
+        }
+
+        /**
+         * @return Whether the GCM API is enabled. The API is only used if the required class dependency
+         * is found, the Google Play Services are available and this setting is {@code true}. The default
+         * value is {@code true}.
+         */
+        public boolean isGcmApiEnabled() {
+            return mGcmEnabled;
+        }
+
+        /**
+         * Programmatic switch to disable the GCM API. If {@code false}, then the {@link AlarmManager} will
+         * be used for Android 4 devices in all cases.
+         *
+         * @param enabled Whether the GCM API should be enabled or disabled. Note that the API is only used,
+         *                if the required class dependency is found, the Google Play Services are available
+         *                and this setting is {@code true}. The default value is {@code true}.
+         */
+        public void setGcmApiEnabled(boolean enabled) {
+            if (enabled == mGcmEnabled) {
+                return;
+            }
+
+            mGcmEnabled = enabled;
+            if (enabled) {
+                JobApi defaultApi = JobApi.getDefault(mContext, true);
+                if (!defaultApi.equals(getApi())) {
+                    setJobProxy(defaultApi);
+                    CAT.i("Changed default proxy to %s after enabled the GCM API", defaultApi);
+                }
+            } else {
+                JobApi defaultApi = JobApi.getDefault(mContext, false);
+                if (JobApi.GCM == getApi()) {
+                    setJobProxy(defaultApi);
+                    CAT.i("Changed default proxy to %s after disabling the GCM API", defaultApi);
+                }
+            }
+        }
+
+        /**
+         * Checks whether a smaller interval and flex are allowed for periodic jobs. That's helpful
+         * for testing purposes.
+         *
+         * @return Whether a smaller interval and flex than the minimum values are allowed for periodic jobs
+         * are allowed. The default value is {@code false}.
+         */
+        public boolean isAllowSmallerIntervalsForMarshmallow() {
+            return mAllowSmallerIntervals && Build.VERSION.SDK_INT < Build.VERSION_CODES.N;
+        }
+
+        /**
+         * Option to override the minimum period and minimum flex for periodic jobs. This is useful for testing
+         * purposes. This method only works for Android M and earlier. Later versions throw an exception.
+         *
+         * @param allowSmallerIntervals Whether a smaller interval and flex than the minimum values are allowed
+         *                              for periodic jobs are allowed. The default value is {@code false}.
+         */
+        public void setAllowSmallerIntervalsForMarshmallow(boolean allowSmallerIntervals) {
+            if (allowSmallerIntervals && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                throw new IllegalStateException("This method is only allowed to call on Android M or earlier");
+            }
+            mAllowSmallerIntervals = allowSmallerIntervals;
+        }
+    }
+
+    private static void sendAddJobCreatorIntent(@NonNull Context context) {
+        Intent intent = new Intent(JobCreator.ACTION_ADD_JOB_CREATOR);
+        List<ResolveInfo> resolveInfos = context.getPackageManager().queryBroadcastReceivers(intent, 0);
+        String myPackage = context.getPackageName();
+
+        for (ResolveInfo resolveInfo : resolveInfos) {
+            ActivityInfo activityInfo = resolveInfo.activityInfo;
+            if (activityInfo == null || activityInfo.exported || !myPackage.equals(activityInfo.packageName)
+                    || TextUtils.isEmpty(activityInfo.name)) {
+                continue;
+            }
+
+            try {
+                JobCreator.AddJobCreatorReceiver receiver =
+                        (JobCreator.AddJobCreatorReceiver) Class.forName(activityInfo.name).newInstance();
+
+                receiver.addJobCreator(context, instance);
+            } catch (Exception ignored) {
+            }
+        }
     }
 }

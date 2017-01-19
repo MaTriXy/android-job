@@ -29,11 +29,15 @@ import android.app.AlarmManager;
 import android.app.job.JobScheduler;
 import android.content.Context;
 import android.os.Build;
+import android.support.annotation.NonNull;
 
+import com.evernote.android.job.JobManager;
 import com.evernote.android.job.JobProxy;
 import com.evernote.android.job.gcm.JobProxyGcm;
 import com.evernote.android.job.v14.JobProxy14;
+import com.evernote.android.job.v19.JobProxy19;
 import com.evernote.android.job.v21.JobProxy21;
+import com.evernote.android.job.v24.JobProxy24;
 import com.google.android.gms.gcm.GcmNetworkManager;
 
 /**
@@ -45,22 +49,50 @@ public enum JobApi {
     /**
      * Uses the {@link JobScheduler} for scheduling jobs.
      */
-    V_21,
+    V_24(true, false),
+    /**
+     * Uses the {@link JobScheduler} for scheduling jobs.
+     */
+    V_21(true, true),
     /**
      * Uses the {@link AlarmManager} for scheduling jobs.
      */
-    V_14,
+    V_19(true, true),
+    /**
+     * Uses the {@link AlarmManager} for scheduling jobs.
+     */
+    V_14(false, true),
     /**
      * Uses the {@link GcmNetworkManager} for scheduling jobs.
      */
-    GCM;
+    GCM(true, false);
 
     private JobProxy mCachedProxy;
 
+    private final boolean mSupportsExecutionWindow;
+    private final boolean mFlexSupport;
+
+    JobApi(boolean supportsExecutionWindow, boolean flexSupport) {
+        mSupportsExecutionWindow = supportsExecutionWindow;
+        mFlexSupport = flexSupport;
+    }
+
+    public boolean supportsExecutionWindow() {
+        return mSupportsExecutionWindow;
+    }
+
+    public boolean isFlexSupport() {
+        return mFlexSupport;
+    }
+
     public boolean isSupported(Context context) {
         switch (this) {
+            case V_24:
+                return Build.VERSION.SDK_INT >= Build.VERSION_CODES.N;
             case V_21:
                 return Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP;
+            case V_19:
+                return Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT;
             case V_14:
                 return true;
             case GCM:
@@ -70,10 +102,15 @@ public enum JobApi {
         }
     }
 
+    @NonNull
     public JobProxy createProxy(Context context) {
         switch (this) {
+            case V_24:
+                return new JobProxy24(context);
             case V_21:
                 return new JobProxy21(context);
+            case V_19:
+                return new JobProxy19(context);
             case V_14:
                 return new JobProxy14(context);
             case GCM:
@@ -83,6 +120,7 @@ public enum JobApi {
         }
     }
 
+    @NonNull
     public synchronized JobProxy getCachedProxy(Context context) {
         if (mCachedProxy == null) {
             mCachedProxy = createProxy(context);
@@ -90,11 +128,26 @@ public enum JobApi {
         return mCachedProxy;
     }
 
+    /**
+     * @deprecated Use {@link #getDefault(Context, boolean)} instead.
+     */
+    @SuppressWarnings("unused")
+    @NonNull
+    @Deprecated
     public static JobApi getDefault(Context context) {
-        if (V_21.isSupported(context)) {
+        return getDefault(context, JobManager.instance().getConfig().isGcmApiEnabled());
+    }
+
+    @NonNull
+    public static JobApi getDefault(Context context, boolean gcmEnabled) {
+        if (V_24.isSupported(context)) {
+            return V_24;
+        } else if (V_21.isSupported(context)) {
             return V_21;
-        } else if (GCM.isSupported(context)) {
+        } else if (gcmEnabled && GCM.isSupported(context)) {
             return GCM;
+        } else if (V_19.isSupported(context)) {
+            return V_19;
         } else {
             return V_14;
         }

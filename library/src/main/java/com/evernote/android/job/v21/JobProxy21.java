@@ -49,66 +49,63 @@ import java.util.List;
 @TargetApi(Build.VERSION_CODES.LOLLIPOP)
 public class JobProxy21 implements JobProxy {
 
-    private static final CatLog CAT = new JobCat("JobProxy21");
+    private static final String TAG = "JobProxy21";
 
-    private final Context mContext;
+    protected final Context mContext;
+    protected final CatLog mCat;
 
     public JobProxy21(Context context) {
+        this(context, TAG);
+    }
+
+    protected JobProxy21(Context context, String logTag) {
         mContext = context;
+        mCat = new JobCat(logTag);
     }
 
     @Override
     public void plantOneOff(JobRequest request) {
-        JobInfo jobInfo = createBaseBuilder(request)
-                .setMinimumLatency(Common.getStartMs(request))
-                .setOverrideDeadline(Common.getEndMs(request))
-                .setRequiresCharging(request.requiresCharging())
-                .setRequiresDeviceIdle(request.requiresDeviceIdle())
-                .setRequiredNetworkType(convertNetworkType(request.requiredNetworkType()))
-                .setPersisted(request.isPersisted())
-                .build();
+        long startMs = Common.getStartMs(request);
+        long endMs = Common.getEndMs(request);
 
-        int scheduleResult;
-        try {
-            scheduleResult = getJobScheduler().schedule(jobInfo);
-        } catch (Exception e) {
-            CAT.e(e);
-            scheduleResult = JobScheduler.RESULT_FAILURE;
-        }
+        JobInfo jobInfo = createBuilderOneOff(createBaseBuilder(request), startMs, endMs).build();
+        int scheduleResult = schedule(jobInfo);
 
-        CAT.d("Schedule one-off jobInfo %s, %s, start %s, end %s", scheduleResult == JobScheduler.RESULT_SUCCESS ? "success" : "failure",
-                request, JobUtil.timeToString(Common.getStartMs(request)), JobUtil.timeToString(Common.getEndMs(request)));
+        mCat.d("Schedule one-off jobInfo %s, %s, start %s, end %s", scheduleResultToString(scheduleResult),
+                request, JobUtil.timeToString(startMs), JobUtil.timeToString(endMs));
     }
 
     @Override
     public void plantPeriodic(JobRequest request) {
-        JobInfo jobInfo = createBaseBuilder(request)
-                .setPeriodic(request.getIntervalMs())
-                .setRequiresCharging(request.requiresCharging())
-                .setRequiresDeviceIdle(request.requiresDeviceIdle())
-                .setRequiredNetworkType(convertNetworkType(request.requiredNetworkType()))
-                .setPersisted(request.isPersisted())
-                .build();
+        long intervalMs = request.getIntervalMs();
+        long flexMs = request.getFlexMs();
 
-        int scheduleResult;
-        try {
-            scheduleResult = getJobScheduler().schedule(jobInfo);
-        } catch (Exception e) {
-            CAT.e(e);
-            scheduleResult = JobScheduler.RESULT_FAILURE;
-        }
+        JobInfo jobInfo = createBuilderPeriodic(createBaseBuilder(request), intervalMs, flexMs).build();
+        int scheduleResult = schedule(jobInfo);
 
-        CAT.d("Schedule periodic jobInfo %s, %s, interval %s", scheduleResult == JobScheduler.RESULT_SUCCESS ? "success" : "failure",
-                request, JobUtil.timeToString(request.getIntervalMs()));
+        mCat.d("Schedule periodic jobInfo %s, %s, interval %s, flex %s", scheduleResultToString(scheduleResult),
+                request, JobUtil.timeToString(intervalMs), JobUtil.timeToString(flexMs));
     }
 
     @Override
-    public void cancel(JobRequest request) {
+    public void plantPeriodicFlexSupport(JobRequest request) {
+        long startMs = Common.getStartMsSupportFlex(request);
+        long endMs = Common.getEndMsSupportFlex(request);
+
+        JobInfo jobInfo = createBuilderOneOff(createBaseBuilder(request), startMs, endMs).build();
+        int scheduleResult = schedule(jobInfo);
+
+        mCat.d("Schedule periodic (flex support) jobInfo %s, %s, start %s, end %s, flex %s", scheduleResultToString(scheduleResult),
+                request, JobUtil.timeToString(startMs), JobUtil.timeToString(endMs), JobUtil.timeToString(request.getFlexMs()));
+    }
+
+    @Override
+    public void cancel(int jobId) {
         try {
-            getJobScheduler().cancel(request.getJobId());
+            getJobScheduler().cancel(jobId);
         } catch (Exception e) {
             // https://gist.github.com/vRallev/5d48a4a8e8d05067834e
-            CAT.e(e);
+            mCat.e(e);
         }
     }
 
@@ -119,10 +116,11 @@ public class JobProxy21 implements JobProxy {
             pendingJobs = getJobScheduler().getAllPendingJobs();
         } catch (Exception e) {
             // it's possible that this throws an exception, see https://gist.github.com/vRallev/a59947dd3932d2642641
-            CAT.e(e);
+            mCat.e(e);
             return false;
         }
 
+        //noinspection ConstantConditions
         if (pendingJobs == null || pendingJobs.isEmpty()) {
             return false;
         }
@@ -138,7 +136,19 @@ public class JobProxy21 implements JobProxy {
     }
 
     protected JobInfo.Builder createBaseBuilder(JobRequest request) {
-        return new JobInfo.Builder(request.getJobId(), new ComponentName(mContext, PlatformJobService.class));
+        return new JobInfo.Builder(request.getJobId(), new ComponentName(mContext, PlatformJobService.class))
+                .setRequiresCharging(request.requiresCharging())
+                .setRequiresDeviceIdle(request.requiresDeviceIdle())
+                .setRequiredNetworkType(convertNetworkType(request.requiredNetworkType()))
+                .setPersisted(request.isPersisted());
+    }
+
+    protected JobInfo.Builder createBuilderOneOff(JobInfo.Builder builder, long startMs, long endMs) {
+        return builder.setMinimumLatency(startMs).setOverrideDeadline(endMs);
+    }
+
+    protected JobInfo.Builder createBuilderPeriodic(JobInfo.Builder builder, long intervalMs, long flexMs) {
+        return builder.setPeriodic(intervalMs);
     }
 
     protected int convertNetworkType(@NonNull JobRequest.NetworkType networkType) {
@@ -149,6 +159,8 @@ public class JobProxy21 implements JobProxy {
                 return JobInfo.NETWORK_TYPE_ANY;
             case UNMETERED:
                 return JobInfo.NETWORK_TYPE_UNMETERED;
+            case NOT_ROAMING:
+                return JobInfo.NETWORK_TYPE_UNMETERED; // use unmetered here, is overwritten in v24
             default:
                 throw new IllegalStateException("not implemented");
         }
@@ -156,5 +168,18 @@ public class JobProxy21 implements JobProxy {
 
     protected final JobScheduler getJobScheduler() {
         return (JobScheduler) mContext.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+    }
+
+    protected final int schedule(JobInfo jobInfo) {
+        try {
+            return getJobScheduler().schedule(jobInfo);
+        } catch (Exception e) {
+            mCat.e(e);
+            return JobScheduler.RESULT_FAILURE;
+        }
+    }
+
+    protected static String scheduleResultToString(int scheduleResult) {
+        return scheduleResult == JobScheduler.RESULT_SUCCESS ? "success" : "failure";
     }
 }

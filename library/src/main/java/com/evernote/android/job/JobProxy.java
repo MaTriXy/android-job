@@ -51,54 +51,97 @@ public interface JobProxy {
 
     void plantPeriodic(JobRequest request);
 
-    void cancel(JobRequest request);
+    void plantPeriodicFlexSupport(JobRequest request);
+
+    void cancel(int jobId);
 
     boolean isPlatformJobScheduled(JobRequest request);
 
     /*package*/ final class Common {
 
+        // see Google Guava: https://github.com/google/guava/blob/master/guava/src/com/google/common/math/LongMath.java
+        private static long checkedAdd(long a, long b) {
+            long result = a + b;
+            return checkNoOverflow(result, (a ^ b) < 0 | (a ^ result) >= 0);
+        }
+
+        private static long checkNoOverflow(long result, boolean condition) {
+            return condition ? result : Long.MAX_VALUE;
+        }
+
         public static long getStartMs(JobRequest request) {
-            return request.getStartMs() + request.getBackoffOffset();
+            return checkedAdd(request.getStartMs(), request.getBackoffOffset());
         }
 
         public static long getEndMs(JobRequest request) {
-            return request.getEndMs() + request.getBackoffOffset();
+            return checkedAdd(request.getEndMs(), request.getBackoffOffset());
         }
 
         public static long getAverageDelayMs(JobRequest request) {
-            return getStartMs(request) + (getEndMs(request) - getStartMs(request)) / 2;
+            return checkedAdd(getStartMs(request), (getEndMs(request) - getStartMs(request)) / 2);
+        }
+
+        public static long getStartMsSupportFlex(JobRequest request) {
+            return Math.max(1, request.getIntervalMs() - request.getFlexMs());
+        }
+
+        public static long getEndMsSupportFlex(JobRequest request) {
+            return request.getIntervalMs();
+        }
+
+        public static long getAverageDelayMsSupportFlex(JobRequest request) {
+            return checkedAdd(getStartMsSupportFlex(request), (getEndMsSupportFlex(request) - getStartMsSupportFlex(request)) / 2);
         }
 
         private final Context mContext;
         private final int mJobId;
         private final CatLog mCat;
 
-        public Common(Service service, int jobId) {
-            mContext = service;
-            mJobId = jobId;
-            mCat = new JobCat(service.getClass());
+        private final JobManager mJobManager;
+
+        public Common(@NonNull Service service, int jobId) {
+            this(service, service.getClass().getSimpleName(), jobId);
         }
 
-        public JobRequest getPendingRequest() {
+        /*package*/ Common(@NonNull Context context, String loggingTag, int jobId) {
+            mContext = context;
+            mJobId = jobId;
+            mCat = new JobCat(loggingTag);
+
+            mJobManager = JobManager.create(context);
+        }
+
+        public JobRequest getPendingRequest(boolean cleanUpOrphanedJob) {
             // order is important for logging purposes
-            JobRequest request = JobManager.instance().getJobRequest(mJobId);
-            Job job = JobManager.instance().getJob(mJobId);
+            JobRequest request = mJobManager.getJobRequest(mJobId, true);
+            Job job = mJobManager.getJob(mJobId);
             boolean periodic = request != null && request.isPeriodic();
 
             if (job != null && !job.isFinished()) {
+                // that's probably a platform bug http://stackoverflow.com/questions/33235754/jobscheduler-posting-jobs-twice-not-expected
                 mCat.d("Job %d is already running, %s", mJobId, request);
+                // not necessary to clean up, the running instance will do that
                 return null;
 
             } else if (job != null && !periodic) {
                 mCat.d("Job %d already finished, %s", mJobId, request);
+                cleanUpOrphanedJob(cleanUpOrphanedJob);
                 return null;
 
             } else if (job != null && System.currentTimeMillis() - job.getFinishedTimeStamp() < 2_000) {
+                // that's probably a platform bug http://stackoverflow.com/questions/33235754/jobscheduler-posting-jobs-twice-not-expected
                 mCat.d("Job %d is periodic and just finished, %s", mJobId, request);
+                // don't clean up, periodic job
+                return null;
+
+            } else if (request != null && request.isTransient()) {
+                mCat.d("Request %d is transient, %s", mJobId, request);
+                // not necessary to clean up, the JobManager will do this for transient jobs
                 return null;
 
             } else if (request == null) {
                 mCat.d("Request for ID %d was null", mJobId);
+                cleanUpOrphanedJob(cleanUpOrphanedJob);
                 return null;
             }
 
@@ -109,11 +152,14 @@ public interface JobProxy {
         public Job.Result executeJobRequest(@NonNull JobRequest request) {
             long waited = System.currentTimeMillis() - request.getScheduledAt();
             String timeWindow;
-            if (JobApi.V_14.equals(request.getJobApi())) {
-                timeWindow = "delay " + JobUtil.timeToString(getAverageDelayMs(request));
-            } else {
+            if (request.isPeriodic()) {
+                timeWindow = String.format(Locale.US, "interval %s, flex %s", JobUtil.timeToString(request.getIntervalMs()),
+                        JobUtil.timeToString(request.getFlexMs()));
+            } else if (request.getJobApi().supportsExecutionWindow()) {
                 timeWindow = String.format(Locale.US, "start %s, end %s", JobUtil.timeToString(getStartMs(request)),
                         JobUtil.timeToString(getEndMs(request)));
+            } else {
+                timeWindow = "delay " + JobUtil.timeToString(getAverageDelayMs(request));
             }
 
             if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -121,15 +167,18 @@ public interface JobProxy {
             }
 
             mCat.d("Run job, %s, waited %s, %s", request, JobUtil.timeToString(waited), timeWindow);
-            JobManager manager = JobManager.instance();
-            JobExecutor jobExecutor = manager.getJobExecutor();
+            JobExecutor jobExecutor = mJobManager.getJobExecutor();
+            Job job = null;
 
             try {
+                // create job first before setting it transient, avoids a race condition while rescheduling jobs
+                job = mJobManager.getJobCreatorHolder().createJob(request.getTag());
+
                 if (!request.isPeriodic()) {
-                    manager.getJobStorage().remove(request);
+                    request.setTransient(true);
                 }
 
-                Future<Job.Result> future = jobExecutor.execute(mContext, request, manager.getJobCreatorHolder());
+                Future<Job.Result> future = jobExecutor.execute(mContext, request, job);
                 if (future == null) {
                     return Job.Result.FAILURE;
                 }
@@ -142,13 +191,44 @@ public interface JobProxy {
             } catch (InterruptedException | ExecutionException e) {
                 mCat.e(e);
 
-                Job job = jobExecutor.getJob(mJobId);
                 if (job != null) {
                     job.cancel();
                     mCat.e("Canceled %s", request);
                 }
 
                 return Job.Result.FAILURE;
+
+            } finally {
+                if (!request.isPeriodic()) {
+                    mJobManager.getJobStorage().remove(request);
+
+                } else if (request.isFlexSupport()) {
+                    mJobManager.getJobStorage().remove(request); // remove, we store the new job in JobManager.schedule()
+                    request.reschedule(false, false);
+                }
+            }
+        }
+
+        private void cleanUpOrphanedJob(boolean cleanUp) {
+            if (cleanUp) {
+                cleanUpOrphanedJob(mContext, mJobId);
+            }
+        }
+
+        public static void cleanUpOrphanedJob(Context context, int jobId) {
+            /*
+             * That's necessary if the database was deleted and jobs (especially the JobScheduler) are still around.
+             * Then if a new job is being scheduled, it's possible that the new job has the ID of the old one. Here
+             * we make sure, that no job is left in the system.
+             */
+            for (JobApi jobApi : JobApi.values()) {
+                if (jobApi.isSupported(context)) {
+                    try {
+                        jobApi.getCachedProxy(context).cancel(jobId);
+                    } catch (Exception ignored) {
+                        // GCM API could crash if it's disabled, ignore crashes at this point and continue
+                    }
+                }
             }
         }
     }

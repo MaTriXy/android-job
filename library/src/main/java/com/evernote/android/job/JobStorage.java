@@ -25,12 +25,14 @@
  */
 package com.evernote.android.job;
 
+import android.annotation.SuppressLint;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.support.annotation.Nullable;
 import android.support.v4.util.LruCache;
 import android.text.TextUtils;
 
@@ -52,11 +54,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
     private static final String JOB_ID_COUNTER = "JOB_ID_COUNTER";
 
-    private static final String PREF_FILE_NAME = "evernote_jobs";
-    private static final String DATABASE_NAME = PREF_FILE_NAME + ".db";
-    private static final int DATABASE_VERSION = 1;
+    public static final String PREF_FILE_NAME = "evernote_jobs";
+    public static final String DATABASE_NAME = PREF_FILE_NAME + ".db";
+    public static final int DATABASE_VERSION = 3;
 
-    private static final String JOB_TABLE_NAME = "jobs";
+    public static final String JOB_TABLE_NAME = "jobs";
 
     public static final String COLUMN_ID = "_id";
     public static final String COLUMN_TAG = "tag";
@@ -74,8 +76,13 @@ import java.util.concurrent.atomic.AtomicInteger;
     public static final String COLUMN_PERSISTED = "persisted";
     public static final String COLUMN_NUM_FAILURES = "numFailures";
     public static final String COLUMN_SCHEDULED_AT = "scheduledAt";
+    public static final String COLUMN_TRANSIENT = "isTransient";
+    public static final String COLUMN_FLEX_MS = "flexMs";
+    public static final String COLUMN_FLEX_SUPPORT = "flexSupport";
 
     private static final int CACHE_SIZE = 30;
+
+    private static final String WHERE_NOT_TRANSIENT = "ifnull(" + COLUMN_TRANSIENT + ", 0)<=0";
 
     private final SharedPreferences mPreferences;
     private final JobCacheId mCacheId;
@@ -83,6 +90,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     private final AtomicInteger mJobCounter;
 
     private final JobOpenHelper mDbHelper;
+    private SQLiteDatabase mDatabase;
 
     public JobStorage(Context context) {
         mPreferences = context.getSharedPreferences(PREF_FILE_NAME, Context.MODE_PRIVATE);
@@ -104,7 +112,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     public synchronized void update(JobRequest request, ContentValues contentValues) {
         updateRequestInCache(request);
         try {
-            mDbHelper.getWritableDatabase().update(JOB_TABLE_NAME, contentValues, COLUMN_ID + "=?", new String[]{String.valueOf(request.getJobId())});
+            getDatabase().update(JOB_TABLE_NAME, contentValues, COLUMN_ID + "=?", new String[]{String.valueOf(request.getJobId())});
         } catch (Exception e) {
             CAT.e(e, "could not update %s", request);
         }
@@ -118,22 +126,25 @@ import java.util.concurrent.atomic.AtomicInteger;
         return mCacheId.get(id);
     }
 
-    public synchronized Set<JobRequest> getAllJobRequests() {
-        return getAllJobRequestsForTag(null);
-    }
-
-    public synchronized Set<JobRequest> getAllJobRequestsForTag(String tag) {
+    public synchronized Set<JobRequest> getAllJobRequests(@Nullable String tag, boolean includeTransient) {
         Set<JobRequest> result = new HashSet<>();
 
         Cursor cursor = null;
         try {
-            SQLiteDatabase database = mDbHelper.getWritableDatabase();
+            String where; // filter transient requests
+            String[] args;
             if (TextUtils.isEmpty(tag)) {
-                cursor = database.query(JOB_TABLE_NAME, null, null, null, null, null, null);
+                where = includeTransient ? null : WHERE_NOT_TRANSIENT;
+                args = null;
             } else {
-                cursor = database.query(JOB_TABLE_NAME, null, COLUMN_TAG + "=?", new String[]{tag}, null, null, null);
+                where = includeTransient ? "" : (WHERE_NOT_TRANSIENT + " AND ");
+                where += COLUMN_TAG + "=?";
+                args = new String[]{tag};
             }
 
+            cursor = getDatabase().query(JOB_TABLE_NAME, null, where, args, null, null, null);
+
+            @SuppressLint("UseSparseArrays")
             HashMap<Integer, JobRequest> cachedRequests = new HashMap<>(mCacheId.snapshot());
 
             while (cursor.moveToNext()) {
@@ -160,7 +171,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     public synchronized void remove(JobRequest request) {
         mCacheId.remove(request.getJobId());
         try {
-            mDbHelper.getWritableDatabase().delete(JOB_TABLE_NAME, COLUMN_ID + "=?", new String[]{String.valueOf(request.getJobId())});
+            getDatabase().delete(JOB_TABLE_NAME, COLUMN_ID + "=?", new String[]{String.valueOf(request.getJobId())});
         } catch (Exception e) {
             CAT.e(e, "could not delete %s", request);
         }
@@ -168,6 +179,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 
     public synchronized int nextJobId() {
         int id = mJobCounter.incrementAndGet();
+
+        if (id < 0) {
+            /*
+             * An overflow occurred. It'll happen rarely, but just in case reset the ID and start from scratch.
+             * Existing jobs will be treated as orphaned and will be overwritten.
+             */
+            id = 1;
+            mJobCounter.set(id);
+        }
+
         mPreferences.edit()
                 .putInt(JOB_ID_COUNTER, id)
                 .apply();
@@ -178,16 +199,21 @@ import java.util.concurrent.atomic.AtomicInteger;
     private void store(JobRequest request) {
         try {
             ContentValues contentValues = request.toContentValues();
-            mDbHelper.getWritableDatabase().insert(JOB_TABLE_NAME, null, contentValues);
+            getDatabase().insert(JOB_TABLE_NAME, null, contentValues);
         } catch (Exception e) {
             CAT.e(e, "could not store %s", request);
         }
     }
 
-    private JobRequest load(int id) {
+    private JobRequest load(int id, boolean includeTransient) {
         Cursor cursor = null;
         try {
-            cursor = mDbHelper.getWritableDatabase().query(JOB_TABLE_NAME, null, COLUMN_ID + "=?", new String[]{String.valueOf(id)}, null, null, null);
+            String where = COLUMN_ID + "=?";
+            if (!includeTransient) {
+                where += " AND " + COLUMN_TRANSIENT + "<=0";
+            }
+
+            cursor = getDatabase().query(JOB_TABLE_NAME, null, where, new String[]{String.valueOf(id)}, null, null, null);
             if (cursor.moveToFirst()) {
                 return JobRequest.fromCursor(cursor);
             }
@@ -204,6 +230,17 @@ import java.util.concurrent.atomic.AtomicInteger;
         return null;
     }
 
+    private SQLiteDatabase getDatabase() {
+        if (mDatabase == null) {
+            synchronized (this) {
+                if (mDatabase == null) {
+                    mDatabase = mDbHelper.getWritableDatabase();
+                }
+            }
+        }
+        return mDatabase;
+    }
+
     private class JobCacheId extends LruCache<Integer, JobRequest> {
 
         public JobCacheId() {
@@ -212,7 +249,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         @Override
         protected JobRequest create(Integer id) {
-            return load(id);
+            return load(id, true);
         }
     }
 
@@ -229,7 +266,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         @Override
         public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-            // not needed at the moment
+            while (oldVersion < newVersion) {
+                switch (oldVersion) {
+                    case 1:
+                        upgradeFrom1To2(db);
+                        oldVersion++;
+                        break;
+                    case 2:
+                        upgradeFrom2To3(db);
+                        oldVersion++;
+                        break;
+                    default:
+                        throw new IllegalStateException("not implemented");
+                }
+            }
         }
 
         private void createJobTable(SQLiteDatabase db) {
@@ -249,7 +299,27 @@ import java.util.concurrent.atomic.AtomicInteger;
                     + COLUMN_EXTRAS + " text, "
                     + COLUMN_PERSISTED + " integer, "
                     + COLUMN_NUM_FAILURES + " integer, "
-                    + COLUMN_SCHEDULED_AT + " integer);");
+                    + COLUMN_SCHEDULED_AT + " integer, "
+                    + COLUMN_TRANSIENT + " integer, "
+                    + COLUMN_FLEX_MS + " integer, "
+                    + COLUMN_FLEX_SUPPORT + " integer);");
+        }
+
+        private void upgradeFrom1To2(SQLiteDatabase db) {
+            db.execSQL("alter table " + JOB_TABLE_NAME + " add column " + COLUMN_TRANSIENT + " integer;");
+        }
+
+        private void upgradeFrom2To3(SQLiteDatabase db) {
+            db.execSQL("alter table " + JOB_TABLE_NAME + " add column " + COLUMN_FLEX_MS + " integer;");
+            db.execSQL("alter table " + JOB_TABLE_NAME + " add column " + COLUMN_FLEX_SUPPORT + " integer;");
+
+            // adjust interval to minimum value if necessary
+            ContentValues contentValues = new ContentValues();
+            contentValues.put(COLUMN_INTERVAL_MS, JobRequest.MIN_INTERVAL);
+            db.update(JOB_TABLE_NAME, contentValues, COLUMN_INTERVAL_MS + ">0 AND " + COLUMN_INTERVAL_MS + "<" + JobRequest.MIN_INTERVAL, new String[0]);
+
+            // copy interval into flex column, that's the default value and the flex support mode is not required
+            db.execSQL("update " + JOB_TABLE_NAME + " set " + COLUMN_FLEX_MS + " = " + COLUMN_INTERVAL_MS + ";");
         }
     }
 }

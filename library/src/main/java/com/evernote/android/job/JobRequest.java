@@ -38,6 +38,7 @@ import com.evernote.android.job.util.JobPreconditions;
 import com.evernote.android.job.util.JobUtil;
 import com.evernote.android.job.util.support.PersistableBundleCompat;
 
+import net.vrallev.android.cat.Cat;
 import net.vrallev.android.cat.CatLog;
 
 import java.util.concurrent.TimeUnit;
@@ -70,13 +71,55 @@ public final class JobRequest {
      */
     public static final NetworkType DEFAULT_NETWORK_TYPE = NetworkType.ANY;
 
+    /**
+     * The minimum interval of a periodic job. Specifying a smaller interval will result in an exception.
+     *
+     * <br>
+     * <br>
+     *
+     * This limit comes from the {@code JobScheduler} starting with Android Nougat. You can read
+     * <a href="https://github.com/evernote/android-job/blob/master/FAQ.md">here</a> more about
+     * the limit.
+     *
+     * @see Builder#setPeriodic(long)
+     * @see Builder#setPeriodic(long, long)
+     */
+    public static final long MIN_INTERVAL = TimeUnit.MINUTES.toMillis(15);
+
+    /**
+     * The minimum flex of a periodic job. Specifying a smaller flex will result in an exception.
+     *
+     * <br>
+     * <br>
+     *
+     * This limit comes from the {@code JobScheduler} starting with Android Nougat. You can read
+     * <a href="https://github.com/evernote/android-job/blob/master/FAQ.md">here</a> more about
+     * the limit.
+     *
+     * @see Builder#setPeriodic(long, long)
+     */
+    public static final long MIN_FLEX = TimeUnit.MINUTES.toMillis(5);
+
+    private static final long WINDOW_THRESHOLD_WARNING = Long.MAX_VALUE / 3;
+    private static final long WINDOW_THRESHOLD_MAX = (Long.MAX_VALUE / 3) * 2;
+
     private static final CatLog CAT = new JobCat("JobRequest");
+
+    /*package*/ static long getMinInterval() {
+        return JobManager.instance().getConfig().isAllowSmallerIntervalsForMarshmallow() ? TimeUnit.MINUTES.toMillis(1) : MIN_INTERVAL;
+    }
+
+    /*package*/ static long getMinFlex() {
+        return JobManager.instance().getConfig().isAllowSmallerIntervalsForMarshmallow() ? TimeUnit.SECONDS.toMillis(30) : MIN_FLEX;
+    }
 
     private final Builder mBuilder;
     private final JobApi mJobApi;
 
     private int mNumFailures;
     private long mScheduledAt;
+    private boolean mTransient;
+    private boolean mFlexSupport;
 
     private JobRequest(Builder builder) {
         mBuilder = builder;
@@ -149,6 +192,16 @@ public final class JobRequest {
      */
     public long getIntervalMs() {
         return mBuilder.mIntervalMs;
+    }
+
+    /**
+     * Flex time for this job. Only valid if this is a periodic job. The job can execute
+     * at any time in a window of flex length at the end of the period.
+     *
+     * @return How close to the end of an interval a periodic job is allowed to run.
+     */
+    public long getFlexMs() {
+        return mBuilder.mFlexMs;
     }
 
     /**
@@ -245,12 +298,45 @@ public final class JobRequest {
         mScheduledAt = timeStamp;
     }
 
-    /*package*/ long getScheduledAt() {
+    /**
+     * Returns the time when this job was scheduled.
+     * <br>
+     * <br>
+     * <b>Note</b> that this value is only useful for non-periodic jobs. The time for periodic
+     * jobs is inconsistent. Sometimes it will return the value when the periodic job was scheduled
+     * for the first time and sometimes it will be updated after each period. The reason for this
+     * limitation is the flex parameter, which was backported to older Android versions. You can
+     * only rely on this value during the first interval of the periodic job.
+     *
+     * @return The time when the job was scheduled.
+     */
+    public long getScheduledAt() {
         return mScheduledAt;
     }
 
     /*package*/ int getNumFailures() {
         return mNumFailures;
+    }
+
+    /**
+     * Only non-periodic jobs can be in a transient state. The transient state means, that
+     * the job is running and is about to be removed. A job can get stuck in a transient state,
+     * if the app terminates while the job is running. Then the job isn't scheduled anymore, but
+     * entry is still in the database. Since the job didn't finish successfully, reschedule
+     * the job if necessary and treat it as it wouldn't have run, yet.
+     *
+     * @return Whether the job is in a transient state.
+     */
+    /*package*/ boolean isTransient() {
+        return mTransient;
+    }
+
+    /*package*/ boolean isFlexSupport() {
+        return mFlexSupport;
+    }
+
+    /*package*/ void setFlexSupport(boolean flexSupport) {
+        mFlexSupport = flexSupport;
     }
 
     /**
@@ -275,6 +361,7 @@ public final class JobRequest {
     public Builder cancelAndEdit() {
         JobManager.instance().cancel(getJobId());
         Builder builder = new Builder(this, false);
+        mTransient = false;
 
         if (!isPeriodic()) {
             long offset = System.currentTimeMillis() - mScheduledAt;
@@ -285,8 +372,8 @@ public final class JobRequest {
         return builder;
     }
 
-    /*package*/ int reschedule(boolean failure) {
-        JobRequest newRequest = new Builder(this, true).build();
+    /*package*/ int reschedule(boolean failure, boolean newJob) {
+        JobRequest newRequest = new Builder(this, newJob).build();
         if (failure) {
             newRequest.mNumFailures = mNumFailures + 1;
         }
@@ -300,11 +387,20 @@ public final class JobRequest {
         JobManager.instance().getJobStorage().update(this, contentValues);
     }
 
+    /*package*/ void setTransient(boolean isTransient) {
+        mTransient = isTransient;
+        ContentValues contentValues = new ContentValues();
+        contentValues.put(JobStorage.COLUMN_TRANSIENT, mTransient);
+        JobManager.instance().getJobStorage().update(this, contentValues);
+    }
+
     /*package*/ ContentValues toContentValues() {
         ContentValues contentValues = new ContentValues();
         mBuilder.fillContentValues(contentValues);
         contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mNumFailures);
         contentValues.put(JobStorage.COLUMN_SCHEDULED_AT, mScheduledAt);
+        contentValues.put(JobStorage.COLUMN_TRANSIENT, mTransient);
+        contentValues.put(JobStorage.COLUMN_FLEX_SUPPORT, mFlexSupport);
         return contentValues;
     }
 
@@ -312,6 +408,8 @@ public final class JobRequest {
         JobRequest request = new Builder(cursor).build();
         request.mNumFailures = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_NUM_FAILURES));
         request.mScheduledAt = cursor.getLong(cursor.getColumnIndex(JobStorage.COLUMN_SCHEDULED_AT));
+        request.mTransient = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_TRANSIENT)) > 0;
+        request.mFlexSupport = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_FLEX_SUPPORT)) > 0;
 
         JobPreconditions.checkArgumentNonnegative(request.mNumFailures, "failure count can't be negative");
         JobPreconditions.checkArgumentNonnegative(request.mScheduledAt, "scheduled at can't be negative");
@@ -354,6 +452,7 @@ public final class JobRequest {
         private BackoffPolicy mBackoffPolicy;
 
         private long mIntervalMs;
+        private long mFlexMs;
 
         private boolean mRequirementsEnforced;
         private boolean mRequiresCharging;
@@ -405,6 +504,7 @@ public final class JobRequest {
             mBackoffPolicy = request.getBackoffPolicy();
 
             mIntervalMs = request.getIntervalMs();
+            mFlexMs = request.getFlexMs();
 
             mRequirementsEnforced = request.requirementsEnforced();
             mRequiresCharging = request.requiresCharging();
@@ -434,6 +534,7 @@ public final class JobRequest {
             }
 
             mIntervalMs = cursor.getLong(cursor.getColumnIndex(JobStorage.COLUMN_INTERVAL_MS));
+            mFlexMs = cursor.getLong(cursor.getColumnIndex(JobStorage.COLUMN_FLEX_MS));
 
             mRequirementsEnforced = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_REQUIREMENTS_ENFORCED)) > 0;
             mRequiresCharging = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_REQUIRES_CHARGING)) > 0;
@@ -462,6 +563,7 @@ public final class JobRequest {
             contentValues.put(JobStorage.COLUMN_BACKOFF_POLICY, mBackoffPolicy.toString());
 
             contentValues.put(JobStorage.COLUMN_INTERVAL_MS, mIntervalMs);
+            contentValues.put(JobStorage.COLUMN_FLEX_MS, mFlexMs);
 
             contentValues.put(JobStorage.COLUMN_REQUIREMENTS_ENFORCED, mRequirementsEnforced);
             contentValues.put(JobStorage.COLUMN_REQUIRES_CHARGING, mRequiresCharging);
@@ -483,12 +585,44 @@ public final class JobRequest {
          * {@link #setPeriodic(long)} or {@link #setExact(long)}. For those types jobs it doesn't
          * make sense to have a time window.
          *
+         * <br>
+         * <br>
+         *
+         * The window specified is treated as offset from now, e.g. the job will run between
+         * {@code System.currentTimeMillis() + startMs} and
+         * {@code System.currentTimeMillis() + endMs}.
+         *
+         * <br>
+         * <br>
+         *
+         * The maximum value for each argument is {@code Long.MAX_VALUE / 3 * 2} (about 53_375_995_583 days).
+         * Otherwise some APIs schedule the job immediately. No exception is thrown if an argument is greater
+         * than the maximum value, the arguments are silently being clamped.
+         *
+         * <br>
+         * <br>
+         *
+         * <b>NOTE:</b> It's not recommended to have such big execution windows. The {@code AlarmManager} used
+         * as fallback API doesn't allow setting a start date. Although being inexact, the execution time is
+         * the arithmetic average of {@code startMs} and {@code endMs}. The result could be that your job never
+         * runs on pre Android 5.0 devices, if one argument is too large.
+         *
          * @param startMs Earliest point from which your task is eligible to run.
          * @param endMs Latest point at which your task must be run.
          */
         public Builder setExecutionWindow(long startMs, long endMs) {
             mStartMs = JobPreconditions.checkArgumentPositive(startMs, "startMs must be greater than 0");
             mEndMs = JobPreconditions.checkArgumentInRange(endMs, startMs, Long.MAX_VALUE, "endMs");
+
+            if (mStartMs > WINDOW_THRESHOLD_MAX) {
+                Cat.i("startMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mStartMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                mStartMs = WINDOW_THRESHOLD_MAX;
+            }
+            if (mEndMs > WINDOW_THRESHOLD_MAX) {
+                Cat.i("endMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mEndMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                mEndMs = WINDOW_THRESHOLD_MAX;
+            }
+
             return this;
         }
 
@@ -617,17 +751,36 @@ public final class JobRequest {
          * The default value is set to {@code false}. Internally an exact job is always using the
          * {@link AlarmManager}.
          *
+         * <br>
+         * <br>
+         *
+         * The milliseconds specified are treated as offset from now, e.g. the job will run at
+         * {@code System.currentTimeMillis() + exactMs}.
+         *
+         * <br>
+         * <br>
+         *
+         * The maximum value of the argument is {@code Long.MAX_VALUE / 3 * 2} (about 53_375_995_583 days).
+         * No exception is thrown if the argument is greater than the maximum value, the argument is
+         * silently being clamped.
+         *
          * @param exactMs The exact offset when the job should run from when the job was scheduled.
          * @see AlarmManager#setExact(int, long, android.app.PendingIntent)
          * @see AlarmManager#setExactAndAllowWhileIdle(int, long, android.app.PendingIntent)
          */
         public Builder setExact(long exactMs) {
             mExact = true;
+            if (exactMs > WINDOW_THRESHOLD_MAX) {
+                Cat.i("exactMs clamped from %d days to %d days", TimeUnit.MILLISECONDS.toDays(exactMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                exactMs = WINDOW_THRESHOLD_MAX;
+            }
+
             return setExecutionWindow(exactMs, exactMs);
         }
 
         /**
-         * This job should run one time during each interval. As default a job isn't periodic.
+         * Specify that this job should recur with the provided interval, not more than once per period. As
+         * default a job isn't periodic.
          *
          * <br>
          * <br>
@@ -636,10 +789,33 @@ public final class JobRequest {
          * with this function. Since {@link Job.Result#RESCHEDULE} is ignored for periodic jobs,
          * setting a back-off criteria is illegal as well.
          *
-         * @param intervalMs The job should at most once every {@code intervalMs}.
+         * @param intervalMs The job should run at most once every {@code intervalMs}. The minimum value is {@code 15min}.
          */
         public Builder setPeriodic(long intervalMs) {
-            mIntervalMs = JobPreconditions.checkArgumentInRange(intervalMs, 60_000L, Long.MAX_VALUE, "intervalMs");
+            return setPeriodic(intervalMs, intervalMs);
+        }
+
+        /**
+         * Specify that this job should recur with the provided interval and flex, not more than once per period.
+         * The flex controls how close to the end of a period the job can run. For example, specifying an interval
+         * of 60 seconds and a flex of 15 seconds will allow the scheduler to determine the best moment between
+         * the 45th and 60th second at which to execute your job.
+         *
+         * <br>
+         * <br>
+         *
+         * As default a job isn't periodic. It isn't allowed to specify a time window for a periodic job.
+         * Instead you set an interval with this function. Since {@link Job.Result#RESCHEDULE} is ignored for
+         * periodic jobs, setting a back-off criteria is illegal as well.
+         *
+         * @param intervalMs The job should run at most once every {@code intervalMs}. The minimum value is {@code 15min}.
+         * @param flexMs How close to the end of the period the job should run. The minimum value is {@code 5min}.
+         * @see #MIN_INTERVAL
+         * @see #MIN_FLEX
+         */
+        public Builder setPeriodic(long intervalMs, long flexMs) {
+            mIntervalMs = JobPreconditions.checkArgumentInRange(intervalMs, getMinInterval(), Long.MAX_VALUE, "intervalMs");
+            mFlexMs = JobPreconditions.checkArgumentInRange(flexMs, getMinFlex(), mIntervalMs, "flexMs");
             return this;
         }
 
@@ -673,7 +849,7 @@ public final class JobRequest {
          * @param persisted If {@code true} the job is scheduled after a reboot.
          */
         public Builder setPersisted(boolean persisted) {
-            if (!JobUtil.hasBootPermission(JobManager.instance().getContext())) {
+            if (persisted && !JobUtil.hasBootPermission(JobManager.instance().getContext())) {
                 throw new IllegalStateException("Does not have RECEIVE_BOOT_COMPLETED permission, which is mandatory for this feature");
             }
             mPersisted = persisted;
@@ -704,7 +880,14 @@ public final class JobRequest {
             JobPreconditions.checkNotNull(mNetworkType);
 
             if (mIntervalMs > 0) {
-                JobPreconditions.checkArgumentInRange(mIntervalMs, 60_000L, Long.MAX_VALUE, "intervalMs");
+                JobPreconditions.checkArgumentInRange(mIntervalMs, getMinInterval(), Long.MAX_VALUE, "intervalMs");
+                JobPreconditions.checkArgumentInRange(mFlexMs, getMinFlex(), mIntervalMs, "flexMs");
+
+                if (mIntervalMs < MIN_INTERVAL || mFlexMs < MIN_FLEX) {
+                    // this means the debug flag is set to true
+                    CAT.w("AllowSmallerIntervals enabled, this will crash on Android N and later, interval %d (minimum is %d), flex %d (minimum is %d)",
+                            mIntervalMs, MIN_INTERVAL, mFlexMs, MIN_FLEX);
+                }
             }
 
             if (mExact && mIntervalMs > 0) {
@@ -726,6 +909,10 @@ public final class JobRequest {
             if (mIntervalMs > 0 && (mBackoffMs != DEFAULT_BACKOFF_MS || !DEFAULT_BACKOFF_POLICY.equals(mBackoffPolicy))) {
                 throw new IllegalArgumentException("A periodic job will not respect any back-off policy, so calling "
                         + "setBackoffCriteria() with setPeriodic() is an error.");
+            }
+
+            if (mIntervalMs <= 0 && (mStartMs > WINDOW_THRESHOLD_WARNING || mEndMs > WINDOW_THRESHOLD_WARNING)) {
+                Cat.w("Attention: your execution window is too large. This could result in undesired behavior, see https://github.com/evernote/android-job/blob/master/FAQ.md");
             }
 
             return new JobRequest(this);
@@ -770,6 +957,10 @@ public final class JobRequest {
         /**
          * Network must be connected and unmetered.
          */
-        UNMETERED
+        UNMETERED,
+        /**
+         * Network must be connected and not roaming, but can be metered.
+         */
+        NOT_ROAMING
     }
 }

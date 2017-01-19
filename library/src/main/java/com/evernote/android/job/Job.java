@@ -31,6 +31,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.PowerManager.WakeLock;
 import android.support.annotation.NonNull;
+import android.support.annotation.WorkerThread;
 import android.support.v4.content.WakefulBroadcastReceiver;
 
 import com.evernote.android.job.util.Device;
@@ -99,6 +100,7 @@ public abstract class Job {
      * {@link Job} is invalid and ignored.
      */
     @NonNull
+    @WorkerThread
     protected abstract Result onRunJob(Params params);
 
     /*package*/ final Result runJob() {
@@ -124,6 +126,7 @@ public abstract class Job {
      * @param newJobId The new ID of the rescheduled {@link JobRequest}.
      */
     @SuppressWarnings("UnusedParameters")
+    @WorkerThread
     protected void onReschedule(int newJobId) {
         // override me
     }
@@ -172,15 +175,19 @@ public abstract class Job {
      */
     protected boolean isRequirementNetworkTypeMet() {
         JobRequest.NetworkType requirement = getParams().getRequest().requiredNetworkType();
+        if (requirement == JobRequest.NetworkType.ANY) {
+            return true;
+        }
+
+        JobRequest.NetworkType current = Device.getNetworkType(getContext());
+
         switch (requirement) {
-            case ANY:
-                return true;
-            case UNMETERED:
-                JobRequest.NetworkType current = Device.getNetworkType(getContext());
-                return JobRequest.NetworkType.UNMETERED.equals(current);
             case CONNECTED:
-                current = Device.getNetworkType(getContext());
-                return !JobRequest.NetworkType.ANY.equals(current);
+                return current != JobRequest.NetworkType.ANY;
+            case NOT_ROAMING:
+                return current == JobRequest.NetworkType.NOT_ROAMING || current == JobRequest.NetworkType.UNMETERED;
+            case UNMETERED:
+                return current == JobRequest.NetworkType.UNMETERED;
             default:
                 throw new IllegalStateException("not implemented");
         }
@@ -322,7 +329,7 @@ public abstract class Job {
     }
 
     /**
-     * Holds several parameters for the executing {@link Job}.
+     * Holds several parameters for the {@link Job} execution.
      */
     protected static final class Params {
 
@@ -331,11 +338,11 @@ public abstract class Job {
 
         private Params(@NonNull JobRequest request) {
             mRequest = request;
-            mExtras = request.getExtras();
         }
 
         /**
          * @return The unique ID for this {@link Job}.
+         * @see JobRequest#getJobId()
          */
         public int getId() {
             return mRequest.getJobId();
@@ -343,6 +350,7 @@ public abstract class Job {
 
         /**
          * @return The tag for this {@link Job} which was passed in the constructor of the {@link JobRequest.Builder}.
+         * @see JobRequest#getTag()
          */
         public String getTag() {
             return mRequest.getTag();
@@ -351,9 +359,143 @@ public abstract class Job {
         /**
          * @return Whether this {@link Job} is periodic or not. If this {@link Job} is periodic, then
          * you shouldn't return {@link Result#RESCHEDULE} as result.
+         * @see JobRequest#isPeriodic()
          */
         public boolean isPeriodic() {
             return mRequest.isPeriodic();
+        }
+
+        /**
+         * @return {@code true} if this job was scheduled at an exact time by calling {@link JobRequest.Builder#setExact(long)}.
+         * @see JobRequest#isExact()
+         */
+        public boolean isExact() {
+            return mRequest.isExact();
+        }
+
+        /**
+         * @return If {@code true}, then the job persists across reboots.
+         * @see JobRequest#isPersisted()
+         */
+        public boolean isPersisted() {
+            return mRequest.isPersisted();
+        }
+
+        /**
+         * Only valid if the job isn't periodic.
+         *
+         * @return The start of the time frame when the job will run after it's been scheduled.
+         * @see JobRequest#getStartMs()
+         */
+        public long getStartMs() {
+            return mRequest.getStartMs();
+        }
+
+        /**
+         * Only valid if the job isn't periodic.
+         *
+         * @return The end of the time frame when the job will run after it's been scheduled.
+         * @see JobRequest#getEndMs()
+         */
+        public long getEndMs() {
+            return mRequest.getEndMs();
+        }
+
+        /**
+         * Only valid if the job is periodic.
+         *
+         * @return The interval in which the job runs once.
+         * @see JobRequest#getIntervalMs()
+         */
+        public long getIntervalMs() {
+            return mRequest.getIntervalMs();
+        }
+
+        /**
+         * Flex time for this job. Only valid if this is a periodic job. The job can execute
+         * at any time in a window of flex length at the end of the period.
+         *
+         * @return How close to the end of an interval a periodic job is allowed to run.
+         * @see JobRequest#getFlexMs()
+         */
+        public long getFlexMs() {
+            return mRequest.getFlexMs();
+        }
+
+        /**
+         * Returns the time when this job was scheduled.
+         * <br>
+         * <br>
+         * <b>Note</b> that this value is only useful for non-periodic jobs. The time for periodic
+         * jobs is inconsistent. Sometimes it will return the value when the periodic job was scheduled
+         * for the first time and sometimes it will be updated after each period. The reason for this
+         * limitation is the flex parameter, which was backported to older Android versions. You can
+         * only rely on this value during the first interval of the periodic job.
+         *
+         * @return The time when the job was scheduled.
+         */
+        public long getScheduledAt() {
+            return mRequest.getScheduledAt();
+        }
+
+        /**
+         * Only valid if the job isn't periodic.
+         *
+         * @return The initial back-off time which is increasing depending on the {@link #getBackoffPolicy()}
+         * if the job fails multiple times.
+         * @see JobRequest#getBackoffMs()
+         */
+        public long getBackoffMs() {
+            return mRequest.getBackoffMs();
+        }
+
+        /**
+         * Only valid if the job isn't periodic.
+         *
+         * @return The back-off policy if a job failed and is rescheduled.
+         * @see JobRequest#getBackoffPolicy()
+         */
+        public JobRequest.BackoffPolicy getBackoffPolicy() {
+            return mRequest.getBackoffPolicy();
+        }
+
+        /**
+         * Call {@link #isRequirementChargingMet()} to check whether this requirement is fulfilled.
+         *
+         * @return If {@code true}, then the job should only run if the device is charging.
+         * @see JobRequest#requiresCharging()
+         */
+        public boolean requiresCharging() {
+            return mRequest.requiresCharging();
+        }
+
+        /**
+         * Call {@link #isRequirementDeviceIdleMet()} to check whether this requirement is fulfilled.
+         *
+         * @return If {@code true}, then job should only run if the device is idle.
+         * @see JobRequest#requiresDeviceIdle()
+         */
+        public boolean requiresDeviceIdle() {
+            return mRequest.requiresDeviceIdle();
+        }
+
+        /**
+         * Call {@link #isRequirementNetworkTypeMet()} to check whether this requirement is fulfilled.
+         *
+         * @return The network state which is required to run the job.
+         * @see JobRequest#requiredNetworkType()
+         */
+        public JobRequest.NetworkType requiredNetworkType() {
+            return mRequest.requiredNetworkType();
+        }
+
+        /**
+         * @return If {@code true}, then all requirements are checked before the job runs. If one requirement
+         * isn't met, then the job is rescheduled right away.
+         * @see JobRequest#requirementsEnforced()
+         */
+        public boolean requirementsEnforced() {
+            return mRequest.requirementsEnforced();
         }
 
         /**
@@ -372,7 +514,10 @@ public abstract class Job {
         @NonNull
         public PersistableBundleCompat getExtras() {
             if (mExtras == null) {
-                mExtras = new PersistableBundleCompat();
+                mExtras = mRequest.getExtras();
+                if (mExtras == null) {
+                    mExtras = new PersistableBundleCompat();
+                }
             }
             return mExtras;
         }

@@ -23,35 +23,58 @@
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.evernote.android.job.gcm;
+package com.evernote.android.job.v24;
 
-import com.evernote.android.job.Job;
-import com.evernote.android.job.JobProxy;
+import android.annotation.TargetApi;
+import android.app.job.JobInfo;
+import android.content.Context;
+import android.os.Build;
+import android.support.annotation.NonNull;
+
 import com.evernote.android.job.JobRequest;
-import com.google.android.gms.gcm.GcmNetworkManager;
-import com.google.android.gms.gcm.GcmTaskService;
-import com.google.android.gms.gcm.TaskParams;
+import com.evernote.android.job.v21.JobProxy21;
+
 
 /**
  * @author rwondratschek
  */
-public class PlatformGcmService extends GcmTaskService {
+@TargetApi(Build.VERSION_CODES.N)
+public class JobProxy24 extends JobProxy21 {
+
+    private static final String TAG = "JobProxy24";
+
+    public JobProxy24(Context context) {
+        super(context, TAG);
+    }
 
     @Override
-    public int onRunTask(TaskParams taskParams) {
-        int jobId = Integer.parseInt(taskParams.getTag());
-        JobProxy.Common common = new JobProxy.Common(this, jobId);
+    public void plantPeriodicFlexSupport(JobRequest request) {
+        mCat.w("plantPeriodicFlexSupport called although flex is supported");
+        super.plantPeriodicFlexSupport(request);
+    }
 
-        JobRequest request = common.getPendingRequest(true);
-        if (request == null) {
-            return GcmNetworkManager.RESULT_FAILURE;
+    @Override
+    public boolean isPlatformJobScheduled(JobRequest request) {
+        try {
+            return getJobScheduler().getPendingJob(request.getJobId()) != null;
+        } catch (Exception e) {
+            mCat.e(e);
+            return false;
         }
+    }
 
-        Job.Result result = common.executeJobRequest(request);
-        if (Job.Result.SUCCESS.equals(result)) {
-            return GcmNetworkManager.RESULT_SUCCESS;
-        } else {
-            return GcmNetworkManager.RESULT_FAILURE;
+    @Override
+    protected JobInfo.Builder createBuilderPeriodic(JobInfo.Builder builder, long intervalMs, long flexMs) {
+        return builder.setPeriodic(intervalMs, flexMs);
+    }
+
+    @Override
+    protected int convertNetworkType(@NonNull JobRequest.NetworkType networkType) {
+        switch (networkType) {
+            case NOT_ROAMING:
+                return JobInfo.NETWORK_TYPE_NOT_ROAMING;
+            default:
+                return super.convertNetworkType(networkType);
         }
     }
 }

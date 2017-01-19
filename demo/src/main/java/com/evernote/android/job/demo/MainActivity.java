@@ -27,6 +27,7 @@ public class MainActivity extends Activity {
 
     private int mLastJobId;
 
+    private CompoundButton mEnableGcm;
     private CompoundButton mRequiresCharging;
     private CompoundButton mRequiresDeviceIdle;
     private Spinner mNetworkTypeSpinner;
@@ -44,6 +45,7 @@ public class MainActivity extends Activity {
             mLastJobId = savedInstanceState.getInt(LAST_JOB_ID, 0);
         }
 
+        mEnableGcm = (CompoundButton) findViewById(R.id.enable_gcm);
         mRequiresCharging = (CompoundButton) findViewById(R.id.check_requires_charging);
         mRequiresDeviceIdle = (CompoundButton) findViewById(R.id.check_requires_device_idle);
         mNetworkTypeSpinner = (Spinner) findViewById(R.id.spinner_network_type);
@@ -51,6 +53,15 @@ public class MainActivity extends Activity {
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, getNetworkTypesAsString());
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         mNetworkTypeSpinner.setAdapter(adapter);
+
+        mEnableGcm.setChecked(mJobManager.getConfig().isGcmApiEnabled());
+        mEnableGcm.setEnabled(JobApi.GCM.isSupported(this));
+        mEnableGcm.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                mJobManager.getConfig().setGcmApiEnabled(isChecked);
+            }
+        });
     }
 
     @Override
@@ -69,15 +80,25 @@ public class MainActivity extends Activity {
     public boolean onPrepareOptionsMenu(Menu menu) {
         super.onPrepareOptionsMenu(menu);
 
-        if (JobApi.V_14.isSupported(this)) {
-            menu.findItem(R.id.action_force_14).setChecked(false);
+        if (JobApi.V_24.isSupported(this)) {
+            menu.findItem(R.id.action_force_24).setChecked(false);
         } else {
-            menu.findItem(R.id.action_force_14).setVisible(false);
+            menu.findItem(R.id.action_force_24).setVisible(false);
         }
         if (JobApi.V_21.isSupported(this)) {
             menu.findItem(R.id.action_force_21).setChecked(false);
         } else {
             menu.findItem(R.id.action_force_21).setVisible(false);
+        }
+        if (JobApi.V_19.isSupported(this)) {
+            menu.findItem(R.id.action_force_19).setChecked(false);
+        } else {
+            menu.findItem(R.id.action_force_19).setVisible(false);
+        }
+        if (JobApi.V_14.isSupported(this)) {
+            menu.findItem(R.id.action_force_14).setChecked(false);
+        } else {
+            menu.findItem(R.id.action_force_14).setVisible(false);
         }
         if (JobApi.GCM.isSupported(this)) {
             menu.findItem(R.id.action_force_gcm).setChecked(false);
@@ -86,8 +107,14 @@ public class MainActivity extends Activity {
         }
 
         switch (mJobManager.getApi()) {
+            case V_24:
+                menu.findItem(R.id.action_force_24).setChecked(true);
+                break;
             case V_21:
                 menu.findItem(R.id.action_force_21).setChecked(true);
+                break;
+            case V_19:
+                menu.findItem(R.id.action_force_19).setChecked(true);
                 break;
             case V_14:
                 menu.findItem(R.id.action_force_14).setChecked(true);
@@ -105,8 +132,14 @@ public class MainActivity extends Activity {
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         switch (item.getItemId()) {
+            case R.id.action_force_24:
+                mJobManager.forceApi(JobApi.V_24);
+                return true;
             case R.id.action_force_21:
                 mJobManager.forceApi(JobApi.V_21);
+                return true;
+            case R.id.action_force_19:
+                mJobManager.forceApi(JobApi.V_19);
                 return true;
             case R.id.action_force_14:
                 mJobManager.forceApi(JobApi.V_14);
@@ -147,8 +180,8 @@ public class MainActivity extends Activity {
                 }
                 break;
 
-            case R.id.button_file_activity:
-                startActivity(new Intent(this, FileActivity.class));
+            case R.id.button_sync_history:
+                startActivity(new Intent(this, SyncHistoryActivity.class));
                 break;
         }
     }
@@ -157,7 +190,7 @@ public class MainActivity extends Activity {
         PersistableBundleCompat extras = new PersistableBundleCompat();
         extras.putString("key", "Hello world");
 
-        mLastJobId = new JobRequest.Builder(DemoJob.TAG)
+        mLastJobId = new JobRequest.Builder(DemoSyncJob.TAG)
                 .setExecutionWindow(3_000L, 4_000L)
                 .setBackoffCriteria(5_000L, JobRequest.BackoffPolicy.LINEAR)
                 .setRequiresCharging(mRequiresCharging.isChecked())
@@ -186,8 +219,8 @@ public class MainActivity extends Activity {
     }
 
     private void testPeriodic() {
-        mLastJobId = new JobRequest.Builder(DemoJob.TAG)
-                .setPeriodic(60_000L)
+        mLastJobId = new JobRequest.Builder(DemoSyncJob.TAG)
+                .setPeriodic(JobRequest.MIN_INTERVAL, JobRequest.MIN_FLEX)
                 .setRequiresCharging(mRequiresCharging.isChecked())
                 .setRequiresDeviceIdle(mRequiresDeviceIdle.isChecked())
                 .setRequiredNetworkType(JobRequest.NetworkType.values()[mNetworkTypeSpinner.getSelectedItemPosition()])
@@ -200,7 +233,7 @@ public class MainActivity extends Activity {
         PersistableBundleCompat extras = new PersistableBundleCompat();
         extras.putString("key", "Hello world");
 
-        mLastJobId = new JobRequest.Builder(DemoJob.TAG)
+        mLastJobId = new JobRequest.Builder(DemoSyncJob.TAG)
                 .setBackoffCriteria(5_000L, JobRequest.BackoffPolicy.EXPONENTIAL)
                 .setExtras(extras)
                 .setExact(20_000L)
