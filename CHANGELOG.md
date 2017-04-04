@@ -1,3 +1,30 @@
+## 1.1.9
+
+* Improve logging by providing an option to add a custom logger
+* Fix crash when rescheduling jobs, see #164
+* Fix wrong returned network type, see #166
+* Expose failure count in the `JobRequest` class, see #168
+* Don't silently eat `JobScheduler`'s limit exception
+
+## 1.1.8 (2017-03-23)
+
+* Catch wake lock crashes in all cases, fixes #153
+* Use a better execution in parallel with the `AlarmManager`. This may prevent a process death.
+* Use better thread names
+* List for quick boot completed broad casts, see #157
+
+## 1.1.7 (2017-02-27)
+
+* Use a service to reschedule jobs and prevent a too early process death, fixes #142
+
+## 1.1.6 (2017-02-13)
+
+* Reschedule jobs after an app update occurred or the Google Play Services were updated, see #135
+
+## 1.1.5 (2017-01-25)
+
+* Use only back-off criteria when rescheduling jobs, see #134
+
 ## 1.1.4 (2017-01-05)
 
 * Expose schedule time of a job

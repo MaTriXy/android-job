@@ -38,7 +38,6 @@ import com.evernote.android.job.util.JobPreconditions;
 import com.evernote.android.job.util.JobUtil;
 import com.evernote.android.job.util.support.PersistableBundleCompat;
 
-import net.vrallev.android.cat.Cat;
 import net.vrallev.android.cat.CatLog;
 
 import java.util.concurrent.TimeUnit;
@@ -116,7 +115,7 @@ public final class JobRequest {
     private final Builder mBuilder;
     private final JobApi mJobApi;
 
-    private int mNumFailures;
+    private int mFailureCount;
     private long mScheduledAt;
     private boolean mTransient;
     private boolean mFlexSupport;
@@ -272,14 +271,14 @@ public final class JobRequest {
         long offset;
         switch (getBackoffPolicy()) {
             case LINEAR:
-                offset = mNumFailures * getBackoffMs();
+                offset = mFailureCount * getBackoffMs();
                 break;
 
             case EXPONENTIAL:
-                if (mNumFailures == 0) {
+                if (mFailureCount == 0) {
                     offset = 0L;
                 } else {
-                    offset = (long) (getBackoffMs() * Math.pow(2, mNumFailures - 1));
+                    offset = (long) (getBackoffMs() * Math.pow(2, mFailureCount - 1));
                 }
                 break;
 
@@ -314,15 +313,21 @@ public final class JobRequest {
         return mScheduledAt;
     }
 
-    /*package*/ int getNumFailures() {
-        return mNumFailures;
+    /**
+     * The failure count increases if a non periodic {@link Job} was rescheduled or if a periodic
+     * {@link Job} wasn't successful.
+     *
+     * @return How often the job already has failed.
+     */
+    public int getFailureCount() {
+        return mFailureCount;
     }
 
     /**
      * Only non-periodic jobs can be in a transient state. The transient state means, that
      * the job is running and is about to be removed. A job can get stuck in a transient state,
      * if the app terminates while the job is running. Then the job isn't scheduled anymore, but
-     * entry is still in the database. Since the job didn't finish successfully, reschedule
+     * the entry is still in the database. Since the job didn't finish successfully, reschedule
      * the job if necessary and treat it as it wouldn't have run, yet.
      *
      * @return Whether the job is in a transient state.
@@ -375,15 +380,15 @@ public final class JobRequest {
     /*package*/ int reschedule(boolean failure, boolean newJob) {
         JobRequest newRequest = new Builder(this, newJob).build();
         if (failure) {
-            newRequest.mNumFailures = mNumFailures + 1;
+            newRequest.mFailureCount = mFailureCount + 1;
         }
         return newRequest.schedule();
     }
 
     /*package*/ void incNumFailures() {
-        mNumFailures++;
+        mFailureCount++;
         ContentValues contentValues = new ContentValues();
-        contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mNumFailures);
+        contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mFailureCount);
         JobManager.instance().getJobStorage().update(this, contentValues);
     }
 
@@ -397,7 +402,7 @@ public final class JobRequest {
     /*package*/ ContentValues toContentValues() {
         ContentValues contentValues = new ContentValues();
         mBuilder.fillContentValues(contentValues);
-        contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mNumFailures);
+        contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mFailureCount);
         contentValues.put(JobStorage.COLUMN_SCHEDULED_AT, mScheduledAt);
         contentValues.put(JobStorage.COLUMN_TRANSIENT, mTransient);
         contentValues.put(JobStorage.COLUMN_FLEX_SUPPORT, mFlexSupport);
@@ -406,12 +411,12 @@ public final class JobRequest {
 
     /*package*/ static JobRequest fromCursor(Cursor cursor) throws Exception {
         JobRequest request = new Builder(cursor).build();
-        request.mNumFailures = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_NUM_FAILURES));
+        request.mFailureCount = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_NUM_FAILURES));
         request.mScheduledAt = cursor.getLong(cursor.getColumnIndex(JobStorage.COLUMN_SCHEDULED_AT));
         request.mTransient = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_TRANSIENT)) > 0;
         request.mFlexSupport = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_FLEX_SUPPORT)) > 0;
 
-        JobPreconditions.checkArgumentNonnegative(request.mNumFailures, "failure count can't be negative");
+        JobPreconditions.checkArgumentNonnegative(request.mFailureCount, "failure count can't be negative");
         JobPreconditions.checkArgumentNonnegative(request.mScheduledAt, "scheduled at can't be negative");
 
         return request;
@@ -615,11 +620,11 @@ public final class JobRequest {
             mEndMs = JobPreconditions.checkArgumentInRange(endMs, startMs, Long.MAX_VALUE, "endMs");
 
             if (mStartMs > WINDOW_THRESHOLD_MAX) {
-                Cat.i("startMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mStartMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                CAT.i("startMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mStartMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
                 mStartMs = WINDOW_THRESHOLD_MAX;
             }
             if (mEndMs > WINDOW_THRESHOLD_MAX) {
-                Cat.i("endMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mEndMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                CAT.i("endMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mEndMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
                 mEndMs = WINDOW_THRESHOLD_MAX;
             }
 
@@ -771,7 +776,7 @@ public final class JobRequest {
         public Builder setExact(long exactMs) {
             mExact = true;
             if (exactMs > WINDOW_THRESHOLD_MAX) {
-                Cat.i("exactMs clamped from %d days to %d days", TimeUnit.MILLISECONDS.toDays(exactMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                CAT.i("exactMs clamped from %d days to %d days", TimeUnit.MILLISECONDS.toDays(exactMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
                 exactMs = WINDOW_THRESHOLD_MAX;
             }
 
@@ -912,7 +917,7 @@ public final class JobRequest {
             }
 
             if (mIntervalMs <= 0 && (mStartMs > WINDOW_THRESHOLD_WARNING || mEndMs > WINDOW_THRESHOLD_WARNING)) {
-                Cat.w("Attention: your execution window is too large. This could result in undesired behavior, see https://github.com/evernote/android-job/blob/master/FAQ.md");
+                CAT.w("Attention: your execution window is too large. This could result in undesired behavior, see https://github.com/evernote/android-job/blob/master/FAQ.md");
             }
 
             return new JobRequest(this);

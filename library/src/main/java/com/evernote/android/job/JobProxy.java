@@ -26,12 +26,13 @@
 package com.evernote.android.job;
 
 import android.app.Service;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Looper;
 import android.support.annotation.NonNull;
 
 import com.evernote.android.job.util.JobApi;
-import com.evernote.android.job.util.JobCat;
 import com.evernote.android.job.util.JobUtil;
 
 import net.vrallev.android.cat.CatLog;
@@ -39,6 +40,8 @@ import net.vrallev.android.cat.CatLog;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A proxy for each {@link JobApi}.
@@ -59,6 +62,23 @@ public interface JobProxy {
 
     /*package*/ final class Common {
 
+        public static final ThreadFactory COMMON_THREAD_FACTORY = new ThreadFactory() {
+
+            private final AtomicInteger mThreadNumber = new AtomicInteger();
+
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, "AndroidJob-" + mThreadNumber.incrementAndGet());
+                if (thread.isDaemon()) {
+                    thread.setDaemon(false);
+                }
+                if (thread.getPriority() != Thread.NORM_PRIORITY) {
+                    thread.setPriority(Thread.NORM_PRIORITY);
+                }
+                return thread;
+            }
+        };
+
         // see Google Guava: https://github.com/google/guava/blob/master/guava/src/com/google/common/math/LongMath.java
         private static long checkedAdd(long a, long b) {
             long result = a + b;
@@ -70,11 +90,19 @@ public interface JobProxy {
         }
 
         public static long getStartMs(JobRequest request) {
-            return checkedAdd(request.getStartMs(), request.getBackoffOffset());
+            if (request.getFailureCount() > 0) {
+                return request.getBackoffOffset();
+            } else {
+                return request.getStartMs();
+            }
         }
 
         public static long getEndMs(JobRequest request) {
-            return checkedAdd(request.getEndMs(), request.getBackoffOffset());
+            if (request.getFailureCount() > 0) {
+                return request.getBackoffOffset();
+            } else {
+                return request.getEndMs();
+            }
         }
 
         public static long getAverageDelayMs(JobRequest request) {
@@ -93,20 +121,24 @@ public interface JobProxy {
             return checkedAdd(getStartMsSupportFlex(request), (getEndMsSupportFlex(request) - getStartMsSupportFlex(request)) / 2);
         }
 
+        public static int getRescheduleCount(JobRequest request) {
+            return request.getFailureCount();
+        }
+
         private final Context mContext;
         private final int mJobId;
         private final CatLog mCat;
 
         private final JobManager mJobManager;
 
-        public Common(@NonNull Service service, int jobId) {
-            this(service, service.getClass().getSimpleName(), jobId);
+        public Common(@NonNull Service service, CatLog cat, int jobId) {
+            this((Context) service, cat, jobId);
         }
 
-        /*package*/ Common(@NonNull Context context, String loggingTag, int jobId) {
+        /*package*/ Common(@NonNull Context context, CatLog cat, int jobId) {
             mContext = context;
             mJobId = jobId;
-            mCat = new JobCat(loggingTag);
+            mCat = cat;
 
             mJobManager = JobManager.create(context);
         }
@@ -230,6 +262,14 @@ public interface JobProxy {
                     }
                 }
             }
+        }
+
+        public static ComponentName startWakefulService(Context context, Intent intent) {
+            return WakeLockUtil.startWakefulService(context, intent);
+        }
+
+        public static boolean completeWakefulIntent(Intent intent) {
+            return WakeLockUtil.completeWakefulIntent(intent);
         }
     }
 }

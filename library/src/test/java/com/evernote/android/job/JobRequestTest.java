@@ -1,56 +1,23 @@
 package com.evernote.android.job;
 
-import android.support.annotation.NonNull;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.LargeTest;
-import android.support.test.runner.AndroidJUnit4;
-
+import com.evernote.android.job.test.DummyJobs;
+import com.evernote.android.job.test.JobRobolectricTestRunner;
 import com.evernote.android.job.util.JobApi;
 import com.evernote.android.job.util.support.PersistableBundleCompat;
-import com.facebook.stetho.Stetho;
 
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
+import org.junit.FixMethodOrder;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.junit.runners.MethodSorters;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Java6Assertions.assertThat;
 
 /**
  * @author rwondratschek
  */
-@RunWith(AndroidJUnit4.class)
-@LargeTest
-public class JobRequestTest {
-
-    @BeforeClass
-    public static void beforeClass() {
-        Stetho.initializeWithDefaults(InstrumentationRegistry.getContext());
-
-        JobManager.create(InstrumentationRegistry.getContext()).addJobCreator(new JobCreator() {
-            @Override
-            public Job create(String tag) {
-                return new TestJob();
-            }
-        });
-    }
-
-    @AfterClass
-    public static void afterClass() {
-        JobManager.instance().destroy();
-    }
-
-    @Before
-    public void beforeTest() {
-        JobManager.instance().cancelAll();
-    }
-
-    @After
-    public void afterTest() {
-        JobManager.instance().cancelAll();
-    }
+@RunWith(JobRobolectricTestRunner.class)
+@FixMethodOrder(MethodSorters.JVM)
+public class JobRequestTest extends BaseJobManagerTest {
 
     @Test
     public void testSimpleJob() {
@@ -62,7 +29,7 @@ public class JobRequestTest {
                 .build();
 
         assertThat(request.getJobId()).isGreaterThan(0);
-        assertThat(request.getTag()).isEqualTo(TestJob.TAG);
+        assertThat(request.getTag()).isEqualTo(DummyJobs.SuccessJob.TAG);
         assertThat(request.getStartMs()).isEqualTo(2_000L);
         assertThat(request.getEndMs()).isEqualTo(3_000L);
         assertThat(request.getBackoffMs()).isEqualTo(4_000L);
@@ -89,7 +56,7 @@ public class JobRequestTest {
                 .build();
 
         assertThat(request.getJobId()).isGreaterThan(0);
-        assertThat(request.getTag()).isEqualTo(TestJob.TAG);
+        assertThat(request.getTag()).isEqualTo(DummyJobs.SuccessJob.TAG);
         assertThat(request.isPersisted()).isTrue();
         assertThat(request.getIntervalMs()).isEqualTo(interval);
         assertThat(request.getFlexMs()).isEqualTo(interval);
@@ -110,17 +77,18 @@ public class JobRequestTest {
 
     @Test
     public void testFlex() {
+        JobManager.instance().forceApi(JobApi.V_14);
+
         long interval = JobRequest.MIN_INTERVAL * 5;
         long flex = JobRequest.MIN_FLEX * 5;
         JobRequest request = getBuilder()
                 .setPeriodic(interval, flex)
                 .build();
 
-        JobManager.instance().forceApi(JobApi.V_14);
         JobManager.instance().schedule(request);
 
         assertThat(request.getJobId()).isGreaterThan(0);
-        assertThat(request.getTag()).isEqualTo(TestJob.TAG);
+        assertThat(request.getTag()).isEqualTo(DummyJobs.SuccessJob.TAG);
         assertThat(request.getIntervalMs()).isEqualTo(interval);
         assertThat(request.getFlexMs()).isEqualTo(flex);
         assertThat(request.isPeriodic()).isTrue();
@@ -137,7 +105,7 @@ public class JobRequestTest {
                 .build();
 
         assertThat(request.getJobId()).isGreaterThan(0);
-        assertThat(request.getTag()).isEqualTo(TestJob.TAG);
+        assertThat(request.getTag()).isEqualTo(DummyJobs.SuccessJob.TAG);
         assertThat(request.getStartMs()).isEqualTo(2_000L);
         assertThat(request.getEndMs()).isEqualTo(2_000L);
         assertThat(request.getBackoffMs()).isEqualTo(4_000L);
@@ -245,17 +213,6 @@ public class JobRequestTest {
     }
 
     private JobRequest.Builder getBuilder() {
-        return new JobRequest.Builder(TestJob.TAG);
-    }
-
-    private static final class TestJob extends Job {
-
-        private static final String TAG = "tag";
-
-        @NonNull
-        @Override
-        protected Result onRunJob(@NonNull Params params) {
-            return Result.FAILURE;
-        }
+        return DummyJobs.createBuilder(DummyJobs.SuccessJob.class);
     }
 }

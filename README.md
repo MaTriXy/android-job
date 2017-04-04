@@ -1,6 +1,6 @@
 # Android-Job
 
-An utility library for Android to run jobs delayed in the background. Depending on the Android version either the `JobScheduler`, `GcmNetworkManager` or `AlarmManager` is getting used. You can find out in [this blog post](https://blog.evernote.com/tech/2015/10/26/unified-job-library-android/) or in [these slides](https://speakerdeck.com/vrallev/scheduling-background-job-on-android-at-the-right-time) why you should prefer this library than each separate API. All features from Android Nougat are backward compatible.
+An utility library for Android to run jobs delayed in the background. Depending on the Android version either the `JobScheduler`, `GcmNetworkManager` or `AlarmManager` is getting used. You can find out in [this blog post](https://blog.evernote.com/tech/2015/10/26/unified-job-library-android/) or in [these slides](https://speakerdeck.com/vrallev/scheduling-background-job-on-android-at-the-right-time-1) why you should prefer this library than each separate API. All features from Android Nougat are backward compatible.
 
 ## Download
 
@@ -8,7 +8,7 @@ Download [the latest version](http://search.maven.org/#search|gav|1|g:"com.evern
 
 ```groovy
 dependencies {
-    compile 'com.evernote:android-job:1.1.4'
+    compile 'com.evernote:android-job:1.1.8'
 }
 ```
 

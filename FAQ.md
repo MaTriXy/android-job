@@ -216,3 +216,78 @@ public final class AddReceiver extends AddJobCreatorReceiver {
     }
 }
 ```
+
+### Why aren't my periodic jobs running as expected on Android 5 or higher?
+
+On Android Lollipop or above the `JobScheduler` is used for periodic jobs. Android optimizes apps for battery usage, meaning that it tries to save as much power as possible. If your jobs have a high frequency, then it's possible, that some periods are skipped, because the device is saving battery.
+
+You can read more about Doze and App Standby [in the official documentation](https://developer.android.com/training/monitoring-device-state/doze-standby.html) to understand how it works and its implications.
+
+### What happens with jobs after the app was forced killed?
+
+After the app was force killed (or swiped away from the recent list on some devices) Android clears all pending alarms from the `AlarmManager` for this app. This is problematic, because until the app is being relaunched alarms can't be rescheduled and jobs won't run. Unfortunately, there is no known workaround.
+
+When the app is being relaunched, this library automatically reschedules pending jobs if necessary. The library also register a [boot completed receiver](https://github.com/evernote/android-job/blob/master/library/src/main/java/com/evernote/android/job/JobBootReceiver.java), so that jobs are rescheduled after a reboot.
+
+Note that only the `AlarmManager` is affected. Jobs relying on the `JobScheduler` or `GcmNetworkManager` still work reliable.
+
+### Can I run a job in a different process?
+
+No, that's not possible. The library can't know your process name in advance to start all services in this process. The recommended way is to start your service in the other process from the job.
+
+```java
+public class SeparateProcessJob extends Job {
+    @Override
+    @NonNull
+    protected Result onRunJob(final Params params) {
+        Intent intent = new Intent(getContext(), SeparateProcessService.class);
+        startWakefulService(intent);
+        return Result.SUCCESS;
+    }
+}
+
+public class SeparateProcessService extends IntentService {
+    @Override
+    protected void onHandleIntent(Intent intent) {
+        try {
+            // do work
+        } finally {
+            Job.completeWakefulIntent(intent);
+        }
+    }
+}
+```
+
+### How can I add a custom logger?
+
+By default the library prints all log statement in Logcat. But often you wish to store those somewhere else, e.g. in a file. The `JobCat` class gives you an option register a custom logger. It's recommended to add the logger before creating the `JobManager` instance.
+
+```java
+private class TestPrinter implements CatPrinter {
+
+    @Override
+    public void println(int priority, @NonNull String tag, @NonNull String message, @Nullable Throwable t) {
+        switch (priority) {
+            case Log.ERROR:
+                // do something
+                break;
+        }
+    }
+}
+
+public class App extends Application {
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        JobCat.addLogPrinter(new TestPrinter());
+        JobManager.create(this).addJobCreator(new DemoJobCreator());
+    }
+}
+```
+
+If you wish, you can even disable printing messages to Logcat, if you own logger handles that for you
+```java
+JobCat.setLogcatEnabled(false);
+```

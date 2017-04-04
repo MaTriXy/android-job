@@ -71,8 +71,8 @@ public class JobProxy21 implements JobProxy {
         JobInfo jobInfo = createBuilderOneOff(createBaseBuilder(request), startMs, endMs).build();
         int scheduleResult = schedule(jobInfo);
 
-        mCat.d("Schedule one-off jobInfo %s, %s, start %s, end %s", scheduleResultToString(scheduleResult),
-                request, JobUtil.timeToString(startMs), JobUtil.timeToString(endMs));
+        mCat.d("Schedule one-off jobInfo %s, %s, start %s, end %s, reschedule count %d", scheduleResultToString(scheduleResult),
+                request, JobUtil.timeToString(startMs), JobUtil.timeToString(endMs), Common.getRescheduleCount(request));
     }
 
     @Override
@@ -171,12 +171,7 @@ public class JobProxy21 implements JobProxy {
     }
 
     protected final int schedule(JobInfo jobInfo) {
-        try {
-            return getJobScheduler().schedule(jobInfo);
-        } catch (Exception e) {
-            mCat.e(e);
-            return JobScheduler.RESULT_FAILURE;
-        }
+        return getJobScheduler().schedule(jobInfo);
     }
 
     protected static String scheduleResultToString(int scheduleResult) {

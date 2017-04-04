@@ -34,8 +34,6 @@ import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ResolveInfo;
 import android.os.Build;
-import android.os.PowerManager;
-import android.os.SystemClock;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.text.TextUtils;
@@ -46,13 +44,10 @@ import com.evernote.android.job.util.JobPreconditions;
 import com.evernote.android.job.util.JobUtil;
 import com.google.android.gms.gcm.GcmNetworkManager;
 
-import net.vrallev.android.cat.Cat;
-import net.vrallev.android.cat.CatGlobal;
 import net.vrallev.android.cat.CatLog;
 
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Entry point for scheduling jobs. Depending on the platform and SDK version it uses different APIs
@@ -82,10 +77,9 @@ import java.util.concurrent.TimeUnit;
  *
  * @author rwondratschek
  */
-@SuppressWarnings("unused")
+@SuppressWarnings({"unused", "WeakerAccess"})
 public final class JobManager {
 
-    private static final Package PACKAGE = JobManager.class.getPackage();
     private static final CatLog CAT = new JobCat("JobManager");
 
     @SuppressLint("StaticFieldLeak")
@@ -104,11 +98,6 @@ public final class JobManager {
                 if (instance == null) {
                     JobPreconditions.checkNotNull(context, "Context cannot be null");
 
-                    if (PACKAGE != null) {
-                        // package can be null when class is repackaged, then ignore this
-                        CatGlobal.setDefaultCatLogPackage(PACKAGE.getName(), new JobCat());
-                    }
-
                     if (context.getApplicationContext() != null) {
                         // could be null in unit tests
                         context = context.getApplicationContext();
@@ -117,10 +106,10 @@ public final class JobManager {
                     instance = new JobManager(context);
 
                     if (!JobUtil.hasWakeLockPermission(context)) {
-                        Cat.w("No wake lock permission");
+                        CAT.w("No wake lock permission");
                     }
                     if (!JobUtil.hasBootPermission(context)) {
-                        Cat.w("No boot permission");
+                        CAT.w("No boot permission");
                     }
 
                     sendAddJobCreatorIntent(context);
@@ -191,7 +180,7 @@ public final class JobManager {
 
         setJobProxy(JobApi.getDefault(mContext, mConfig.isGcmApiEnabled()));
 
-        rescheduleTasksIfNecessary();
+        JobRescheduleService.startService(mContext);
     }
 
     /**
@@ -201,7 +190,7 @@ public final class JobManager {
         return mConfig;
     }
 
-    protected void setJobProxy(JobApi api) {
+    private void setJobProxy(JobApi api) {
         mApi = api;
     }
 
@@ -410,6 +399,7 @@ public final class JobManager {
             }
         }
 
+        //noinspection ConstantConditions
         Set<Job> jobs = TextUtils.isEmpty(tag) ? getAllJobs() : getAllJobsForTag(tag);
         for (Job job : jobs) {
             if (cancelInner(job)) {
@@ -471,7 +461,7 @@ public final class JobManager {
         }
     }
 
-    private JobProxy getJobProxy(JobRequest request) {
+    /*package*/ JobProxy getJobProxy(JobRequest request) {
         return getJobProxy(request.getJobApi());
     }
 
@@ -479,60 +469,13 @@ public final class JobManager {
         return api.getCachedProxy(mContext);
     }
 
-    private void rescheduleTasksIfNecessary() {
-        final PowerManager.WakeLock wakeLock = WakeLockUtil.acquireWakeLock(mContext, JobManager.class.getName(), TimeUnit.MINUTES.toMillis(1));
-
-        new Thread() {
-            @Override
-            public void run() {
-                try {
-                    /*
-                     * Delay this slightly. This avoids a race condition if the app was launched by the
-                     * AlarmManager. Then the alarm was already removed, but the JobRequest might still
-                     * be available in the storage. We still catch this case, because we never execute
-                     * a job with the same ID twice. However, the still save resources with the delay.
-                     */
-                    SystemClock.sleep(10_000L);
-
-                    Set<JobRequest> requests = mJobStorage.getAllJobRequests(null, true);
-
-                    int rescheduledCount = 0;
-                    for (JobRequest request : requests) {
-                        boolean reschedule;
-                        if (request.isTransient()) {
-                            Job job = getJob(request.getJobId());
-                            reschedule = job == null;
-                        } else {
-                            reschedule = !getJobProxy(request).isPlatformJobScheduled(request);
-                        }
-
-                        if (reschedule) {
-                            // update execution window
-                            request.cancelAndEdit()
-                                    .build()
-                                    .schedule();
-
-                            rescheduledCount++;
-                        }
-                    }
-
-                    CAT.d("Reschedule %d jobs of %d jobs", rescheduledCount, requests.size());
-
-                } finally {
-                    WakeLockUtil.releaseWakeLock(wakeLock);
-                }
-            }
-        }.start();
-    }
-
+    // TODO: extract this class so that settings can be changed before the JobManager has been created
     public final class Config {
 
-        private boolean mVerbose;
         private boolean mGcmEnabled;
         private boolean mAllowSmallerIntervals;
 
         private Config() {
-            mVerbose = true;
             mGcmEnabled = true;
             mAllowSmallerIntervals = false;
         }
@@ -541,7 +484,7 @@ public final class JobManager {
          * @return Whether logging is enabled for this library. The default value is {@code true}.
          */
         public boolean isVerbose() {
-            return mVerbose;
+            return JobCat.isLogcatEnabled();
         }
 
         /**
@@ -550,10 +493,7 @@ public final class JobManager {
          * @param verbose Whether or not to print all log messages. The default value is {@code true}.
          */
         public void setVerbose(boolean verbose) {
-            if (mVerbose != verbose && PACKAGE != null) {
-                mVerbose = verbose;
-                CatGlobal.setPackageEnabled(PACKAGE.getName(), verbose);
-            }
+            JobCat.setLogcatEnabled(verbose);
         }
 
         /**

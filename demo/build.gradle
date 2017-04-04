@@ -40,17 +40,16 @@ android {
 
     lintOptions {
         abortOnError true
-
-        htmlOutput file("$project.buildDir/reports/lint/lint.html")
-        xmlOutput file("$project.buildDir/reports/lint/lint.xml")
     }
 }
 
 dependencies {
     compile project(':library')
-    compile "com.android.support:appcompat-v7:$rootProject.ext.supportLibVersion"
+    compile "com.android.support:support-v4:$supportLibVersion"
+    compile "com.android.support:appcompat-v7:$supportLibVersion"
+    compile "com.facebook.stetho:stetho:$stethoVersion"
 
-    compile "com.facebook.stetho:stetho:$rootProject.ext.stethoVersion"
-
-    gcmCompile "com.google.android.gms:play-services-gcm:$rootProject.ext.playServicesVersion"
+    gcmCompile "com.google.android.gms:play-services-gcm:$playServicesVersion"
 }
+
+uploadArchives.enabled false
