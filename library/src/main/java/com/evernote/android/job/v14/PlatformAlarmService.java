@@ -1,137 +1,71 @@
 /*
- * Copyright 2007-present Evernote Corporation.
- * All rights reserved.
+ * Copyright (C) 2018 Evernote Corporation
  *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
+ *       http://www.apache.org/licenses/LICENSE-2.0
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
- * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
- * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package com.evernote.android.job.v14;
 
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.os.IBinder;
-import android.support.annotation.Nullable;
+import android.os.Bundle;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.RestrictTo;
+import androidx.core.app.SafeJobIntentService;
 
+import com.evernote.android.job.JobIdsInternal;
 import com.evernote.android.job.JobProxy;
 import com.evernote.android.job.JobRequest;
 import com.evernote.android.job.util.JobCat;
 
-import net.vrallev.android.cat.CatLog;
-
-import java.util.HashSet;
-import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
 /**
  * @author rwondratschek
  */
-public final class PlatformAlarmService extends Service {
+@RestrictTo(RestrictTo.Scope.LIBRARY)
+public final class PlatformAlarmService extends SafeJobIntentService {
 
-    private static final CatLog CAT = new JobCat("PlatformAlarmService");
+    private static final JobCat CAT = new JobCat("PlatformAlarmService");
 
-    /*package*/ static Intent createIntent(Context context, int jobId) {
-        Intent intent = new Intent(context, PlatformAlarmService.class);
+    public static void start(Context context, int jobId, @Nullable Bundle transientExtras) {
+        Intent intent = new Intent();
         intent.putExtra(PlatformAlarmReceiver.EXTRA_JOB_ID, jobId);
-        return intent;
-    }
-
-    private final Object mMonitor = new Object();
-
-    private volatile ExecutorService mExecutorService;
-    private volatile Set<Integer> mStartIds;
-    private volatile int mLastStartId;
-
-    @Override
-    public void onCreate() {
-        super.onCreate();
-        mExecutorService = Executors.newCachedThreadPool(JobProxy.Common.COMMON_THREAD_FACTORY);
-        mStartIds = new HashSet<>();
-    }
-
-    @Override
-    public int onStartCommand(@Nullable final Intent intent, int flags, final int startId) {
-        synchronized (mMonitor) {
-            mStartIds.add(startId);
-            mLastStartId = startId;
+        if (transientExtras != null) {
+            intent.putExtra(PlatformAlarmReceiver.EXTRA_TRANSIENT_EXTRAS, transientExtras);
         }
 
-        mExecutorService.execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    runJob(intent);
-                } finally {
-                    // call here, our own wake lock could be acquired too late
-                    JobProxy.Common.completeWakefulIntent(intent);
-                    stopSelfIfNecessary(startId);
-                }
-            }
-        });
-        return START_NOT_STICKY;
+        enqueueWork(context, PlatformAlarmService.class, JobIdsInternal.JOB_ID_PLATFORM_ALARM_SERVICE, intent);
     }
 
     @Override
-    public void onDestroy() {
-        mExecutorService.shutdown();
-        mExecutorService = null;
-
-        synchronized (mMonitor) {
-            mStartIds = null;
-            mLastStartId = 0;
-        }
+    protected void onHandleWork(@NonNull Intent intent) {
+        runJob(intent, this, CAT);
     }
 
-    @Override
-    public final IBinder onBind(Intent intent) {
-        return null;
-    }
-
-    private void runJob(Intent intent) {
+    /*package*/ static void runJob(@Nullable Intent intent, @NonNull Service service, @NonNull JobCat cat) {
         if (intent == null) {
-            CAT.i("Delivered intent is null");
+            cat.i("Delivered intent is null");
             return;
         }
 
         int jobId = intent.getIntExtra(PlatformAlarmReceiver.EXTRA_JOB_ID, -1);
-        final JobProxy.Common common = new JobProxy.Common(this, CAT, jobId);
+        Bundle transientExtras = intent.getBundleExtra(PlatformAlarmReceiver.EXTRA_TRANSIENT_EXTRAS);
+        final JobProxy.Common common = new JobProxy.Common(service, cat, jobId);
 
         // create the JobManager. Seeing sometimes exceptions, that it wasn't created, yet.
-        final JobRequest request = common.getPendingRequest(true);
+        final JobRequest request = common.getPendingRequest(true, true);
         if (request != null) {
-            common.executeJobRequest(request);
-        }
-    }
-
-    private void stopSelfIfNecessary(int startId) {
-        synchronized (mMonitor) {
-            Set<Integer> startIds = mStartIds;
-            if (startIds != null) {
-                // service not destroyed
-                startIds.remove(startId);
-                if (startIds.isEmpty()) {
-                    stopSelfResult(mLastStartId);
-                }
-            }
+            common.executeJobRequest(request, transientExtras);
         }
     }
 }

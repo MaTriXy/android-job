@@ -1,44 +1,33 @@
 /*
- * Copyright 2007-present Evernote Corporation.
- * All rights reserved.
+ * Copyright (C) 2018 Evernote Corporation
  *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
+ *       http://www.apache.org/licenses/LICENSE-2.0
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
- * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
- * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package com.evernote.android.job;
 
 import android.app.AlarmManager;
+import android.app.Service;
 import android.content.ContentValues;
+import android.content.Context;
 import android.database.Cursor;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
+import android.os.Bundle;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import android.text.TextUtils;
 
-import com.evernote.android.job.util.JobApi;
 import com.evernote.android.job.util.JobCat;
 import com.evernote.android.job.util.JobPreconditions;
-import com.evernote.android.job.util.JobUtil;
 import com.evernote.android.job.util.support.PersistableBundleCompat;
-
-import net.vrallev.android.cat.CatLog;
 
 import java.util.concurrent.TimeUnit;
 
@@ -49,6 +38,7 @@ import java.util.concurrent.TimeUnit;
  *
  * @author rwondratschek
  */
+@SuppressWarnings({"WeakerAccess", "SameParameterValue"})
 public final class JobRequest {
 
     /**
@@ -71,13 +61,27 @@ public final class JobRequest {
     public static final NetworkType DEFAULT_NETWORK_TYPE = NetworkType.ANY;
 
     /**
+     * The default callback that is used when you schedule a {@link JobRequest} asynchronously in
+     * {@link #scheduleAsync()}. This implementation only logs a message in case of a failure and
+     * doesn't crash.
+     */
+    public static final JobScheduledCallback DEFAULT_JOB_SCHEDULED_CALLBACK = new JobScheduledCallback() {
+        @Override
+        public void onJobScheduled(int jobId, @NonNull String tag, @Nullable Exception exception) {
+            if (exception != null) {
+                CAT.e(exception, "The job with tag %s couldn't be scheduled", tag);
+            }
+        }
+    };
+
+    /**
      * The minimum interval of a periodic job. Specifying a smaller interval will result in an exception.
      *
      * <br>
      * <br>
      *
      * This limit comes from the {@code JobScheduler} starting with Android Nougat. You can read
-     * <a href="https://github.com/evernote/android-job/blob/master/FAQ.md">here</a> more about
+     * <a href="https://github.com/evernote/android-job/wiki/FAQ">here</a> more about
      * the limit.
      *
      * @see Builder#setPeriodic(long)
@@ -92,7 +96,7 @@ public final class JobRequest {
      * <br>
      *
      * This limit comes from the {@code JobScheduler} starting with Android Nougat. You can read
-     * <a href="https://github.com/evernote/android-job/blob/master/FAQ.md">here</a> more about
+     * <a href="https://github.com/evernote/android-job/wiki/FAQ">here</a> more about
      * the limit.
      *
      * @see Builder#setPeriodic(long, long)
@@ -102,27 +106,32 @@ public final class JobRequest {
     private static final long WINDOW_THRESHOLD_WARNING = Long.MAX_VALUE / 3;
     private static final long WINDOW_THRESHOLD_MAX = (Long.MAX_VALUE / 3) * 2;
 
-    private static final CatLog CAT = new JobCat("JobRequest");
+    private static final JobCat CAT = new JobCat("JobRequest");
 
     /*package*/ static long getMinInterval() {
-        return JobManager.instance().getConfig().isAllowSmallerIntervalsForMarshmallow() ? TimeUnit.MINUTES.toMillis(1) : MIN_INTERVAL;
+        return JobConfig.isAllowSmallerIntervalsForMarshmallow() ? TimeUnit.MINUTES.toMillis(1) : MIN_INTERVAL;
     }
 
     /*package*/ static long getMinFlex() {
-        return JobManager.instance().getConfig().isAllowSmallerIntervalsForMarshmallow() ? TimeUnit.SECONDS.toMillis(30) : MIN_FLEX;
+        return JobConfig.isAllowSmallerIntervalsForMarshmallow() ? TimeUnit.SECONDS.toMillis(30) : MIN_FLEX;
+    }
+
+    /*package*/ static final long START_NOW = 1;
+
+    private static Context context() {
+        return JobManager.instance().getContext();
     }
 
     private final Builder mBuilder;
-    private final JobApi mJobApi;
 
     private int mFailureCount;
     private long mScheduledAt;
-    private boolean mTransient;
+    private boolean mStarted;
     private boolean mFlexSupport;
+    private long mLastRun;
 
     private JobRequest(Builder builder) {
         mBuilder = builder;
-        mJobApi = builder.mExact ? JobApi.V_14 : JobManager.instance().getApi();
     }
 
     /**
@@ -219,10 +228,24 @@ public final class JobRequest {
     }
 
     /**
-     * @return If {@code true}, then job should only run if the device is idle.
+     * @return If {@code true}, then the job should only run if the device is idle.
      */
     public boolean requiresDeviceIdle() {
         return mBuilder.mRequiresDeviceIdle;
+    }
+
+    /**
+     * @return If {@code true}, then the job should only run if the battery isn't low.
+     */
+    public boolean requiresBatteryNotLow() {
+        return mBuilder.mRequiresBatteryNotLow;
+    }
+
+    /**
+     * @return If {@code true}, then the job should only run if the battery isn't low.
+     */
+    public boolean requiresStorageNotLow() {
+        return mBuilder.mRequiresStorageNotLow;
     }
 
     /**
@@ -233,6 +256,14 @@ public final class JobRequest {
     }
 
     /**
+     * @return Whether any of the requirements is different than the default value.
+     */
+    public boolean hasRequirements() {
+        return requiresCharging() || requiresDeviceIdle() || requiresBatteryNotLow() || requiresStorageNotLow()
+                || requiredNetworkType() != DEFAULT_NETWORK_TYPE;
+    }
+
+    /**
      * @return The extras for this job.
      */
     public PersistableBundleCompat getExtras() {
@@ -240,13 +271,6 @@ public final class JobRequest {
             mBuilder.mExtras = PersistableBundleCompat.fromXml(mBuilder.mExtrasXml);
         }
         return mBuilder.mExtras;
-    }
-
-    /**
-     * @return If {@code true}, then the job persists across reboots.
-     */
-    public boolean isPersisted() {
-        return mBuilder.mPersisted;
     }
 
     /**
@@ -263,7 +287,7 @@ public final class JobRequest {
         return mBuilder.mExact;
     }
 
-    /*package*/ long getBackoffOffset() {
+    /*package*/ long getBackoffOffset(boolean endTime) {
         if (isPeriodic()) {
             return 0L;
         }
@@ -286,11 +310,15 @@ public final class JobRequest {
                 throw new IllegalStateException("not implemented");
         }
 
+        if (endTime && !isExact()) {
+            offset *= 1.2f;
+        }
+
         return Math.min(offset, TimeUnit.HOURS.toMillis(5)); // use max of 5 hours like JobScheduler
     }
 
     /*package*/ JobApi getJobApi() {
-        return mJobApi;
+        return mBuilder.mExact ? JobApi.V_14 : JobApi.getDefault(context());
     }
 
     /*package*/ void setScheduledAt(long timeStamp) {
@@ -324,16 +352,16 @@ public final class JobRequest {
     }
 
     /**
-     * Only non-periodic jobs can be in a transient state. The transient state means, that
-     * the job is running and is about to be removed. A job can get stuck in a transient state,
+     * Only non-periodic jobs can be in a started state. The started state means, that
+     * the job is running and is about to be removed. A job can get stuck in a started state,
      * if the app terminates while the job is running. Then the job isn't scheduled anymore, but
      * the entry is still in the database. Since the job didn't finish successfully, reschedule
      * the job if necessary and treat it as it wouldn't have run, yet.
      *
-     * @return Whether the job is in a transient state.
+     * @return Whether the job is in a started state.
      */
-    /*package*/ boolean isTransient() {
-        return mTransient;
+    /*package*/ boolean isStarted() {
+        return mStarted;
     }
 
     /*package*/ boolean isFlexSupport() {
@@ -345,6 +373,54 @@ public final class JobRequest {
     }
 
     /**
+     * Returns the time the job did run the last time. This is only useful for periodic jobs, daily jobs
+     * or jobs which were rescheduled. If the job didn't run, yet, then it returns 0.
+     *
+     * @return The last time the rescheduled or periodic job did run.
+     */
+    public long getLastRun() {
+        return mLastRun;
+    }
+
+    /**
+     * Returns whether this is a transient jobs. <b>WARNING:</b> It's not guaranteed that a transient job
+     * will run at all, e.g. rebooting the device or force closing the app will cancel the
+     * job.
+     *
+     * @return If this is a transient job.
+     */
+    public boolean isTransient() {
+        return mBuilder.mTransient;
+    }
+
+    /**
+     * Returns the transient extras you passed in when constructing this job with
+     * {@link Builder#setTransientExtras(Bundle)}. <b>WARNING:</b> It's not guaranteed that a transient job
+     * will run at all, e.g. rebooting the device or force closing the app will cancel the
+     * job.
+     *
+     * <br>
+     * <br>
+     *
+     * This will never be {@code null}. If you did not set any extras this will be an empty bundle.
+     * The returned bundle will also be empty, if the request isn't cached anymore.
+     *
+     * @return The transient extras you passed in when constructing this job.
+     */
+    @NonNull
+    public Bundle getTransientExtras() {
+        return mBuilder.mTransientExtras;
+    }
+
+    /**
+     * Schedule a request which will be executed in the future. If you want to update an existing
+     * {@link JobRequest}, call {@link JobRequest#cancelAndEdit()}, update your parameters and call
+     * this method again. Calling this method on the same request instance multiple times without
+     * cancelling is idempotent.
+     *
+     * <br>
+     * <br>
+     *
      * Convenience method. Internally it calls {@link JobManager#schedule(JobRequest)}
      * and {@link #getJobId()} for this request.
      *
@@ -356,6 +432,40 @@ public final class JobRequest {
     }
 
     /**
+     * Helper method to schedule a request on a background thread. This is helpful to avoid IO operations
+     * on the main thread.
+     *
+     * <br>
+     * <br>
+     *
+     * In case of a failure an error is logged, but the application doesn't crash.
+     */
+    public void scheduleAsync() {
+        scheduleAsync(DEFAULT_JOB_SCHEDULED_CALLBACK);
+    }
+
+    /**
+     * Helper method to schedule a request on a background thread. This is helpful to avoid IO operations
+     * on the main thread. The callback notifies you about the job ID or a possible failure.
+     *
+     * @param callback The callback which is invoked after the request has been scheduled.
+     */
+    public void scheduleAsync(@NonNull final JobScheduledCallback callback) {
+        JobPreconditions.checkNotNull(callback);
+        JobConfig.getExecutorService().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    int jobId = schedule();
+                    callback.onJobScheduled(jobId, getTag(), null);
+                } catch (Exception e) {
+                    callback.onJobScheduled(JobScheduledCallback.JOB_ID_ERROR, getTag(), e);
+                }
+            }
+        });
+    }
+
+    /**
      * Cancel this request if it has been scheduled. Note that if the job isn't periodic, then the
      * time passed since the job has been scheduled is subtracted from the time frame. For example
      * a job should run between 4 and 6 seconds from now. You cancel the scheduled job after 2
@@ -364,12 +474,15 @@ public final class JobRequest {
      * @return A builder to modify the parameters.
      */
     public Builder cancelAndEdit() {
+        // create a temporary variable, because .cancel() will reset mScheduledAt
+        long scheduledAt = mScheduledAt;
+
         JobManager.instance().cancel(getJobId());
-        Builder builder = new Builder(this, false);
-        mTransient = false;
+        Builder builder = new Builder(this.mBuilder);
+        mStarted = false;
 
         if (!isPeriodic()) {
-            long offset = System.currentTimeMillis() - mScheduledAt;
+            long offset = JobConfig.getClock().currentTimeMillis() - scheduledAt;
             long minValue = 1L; // 1ms
             builder.setExecutionWindow(Math.max(minValue, getStartMs() - offset), Math.max(minValue, getEndMs() - offset));
         }
@@ -377,25 +490,41 @@ public final class JobRequest {
         return builder;
     }
 
-    /*package*/ int reschedule(boolean failure, boolean newJob) {
-        JobRequest newRequest = new Builder(this, newJob).build();
+    /*package*/ Builder createBuilder() {
+        return new Builder(mBuilder, true);
+    }
+
+    /*package*/ JobRequest reschedule(boolean failure, boolean newJob) {
+        JobRequest newRequest = new Builder(this.mBuilder, newJob).build();
         if (failure) {
             newRequest.mFailureCount = mFailureCount + 1;
         }
-        return newRequest.schedule();
+        try {
+            newRequest.schedule();
+        } catch (Exception e) {
+            CAT.e(e);
+            // this may crash (e.g. more than 100 jobs with JobScheduler), but it's not catchable for the user, wait for reschedule
+        }
+        return newRequest;
     }
 
-    /*package*/ void incNumFailures() {
-        mFailureCount++;
+    /*package*/ void updateStats(boolean incFailureCount, boolean updateLastRun) {
         ContentValues contentValues = new ContentValues();
-        contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mFailureCount);
+        if (incFailureCount) {
+            mFailureCount++;
+            contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mFailureCount);
+        }
+        if (updateLastRun) {
+            mLastRun = JobConfig.getClock().currentTimeMillis();
+            contentValues.put(JobStorage.COLUMN_LAST_RUN, mLastRun);
+        }
         JobManager.instance().getJobStorage().update(this, contentValues);
     }
 
-    /*package*/ void setTransient(boolean isTransient) {
-        mTransient = isTransient;
+    /*package*/ void setStarted(boolean started) {
+        mStarted = started;
         ContentValues contentValues = new ContentValues();
-        contentValues.put(JobStorage.COLUMN_TRANSIENT, mTransient);
+        contentValues.put(JobStorage.COLUMN_STARTED, mStarted);
         JobManager.instance().getJobStorage().update(this, contentValues);
     }
 
@@ -404,17 +533,19 @@ public final class JobRequest {
         mBuilder.fillContentValues(contentValues);
         contentValues.put(JobStorage.COLUMN_NUM_FAILURES, mFailureCount);
         contentValues.put(JobStorage.COLUMN_SCHEDULED_AT, mScheduledAt);
-        contentValues.put(JobStorage.COLUMN_TRANSIENT, mTransient);
+        contentValues.put(JobStorage.COLUMN_STARTED, mStarted);
         contentValues.put(JobStorage.COLUMN_FLEX_SUPPORT, mFlexSupport);
+        contentValues.put(JobStorage.COLUMN_LAST_RUN, mLastRun);
         return contentValues;
     }
 
-    /*package*/ static JobRequest fromCursor(Cursor cursor) throws Exception {
+    /*package*/ static JobRequest fromCursor(Cursor cursor) {
         JobRequest request = new Builder(cursor).build();
         request.mFailureCount = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_NUM_FAILURES));
         request.mScheduledAt = cursor.getLong(cursor.getColumnIndex(JobStorage.COLUMN_SCHEDULED_AT));
-        request.mTransient = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_TRANSIENT)) > 0;
+        request.mStarted = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_STARTED)) > 0;
         request.mFlexSupport = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_FLEX_SUPPORT)) > 0;
+        request.mLastRun = cursor.getLong(cursor.getColumnIndex(JobStorage.COLUMN_LAST_RUN));
 
         JobPreconditions.checkArgumentNonnegative(request.mFailureCount, "failure count can't be negative");
         JobPreconditions.checkArgumentNonnegative(request.mScheduledAt, "scheduled at can't be negative");
@@ -439,16 +570,19 @@ public final class JobRequest {
 
     @Override
     public String toString() {
-        return "request{id=" + getJobId() + ", tag=" + getTag() + '}';
+        return "request{id=" + getJobId() + ", tag=" + getTag() + ", transient=" + isTransient() + '}';
     }
 
     /**
      * Builder class for constructing JobRequests.
      */
+    @SuppressWarnings("unused")
     public static final class Builder {
 
-        private final int mId;
-        private final String mTag;
+        private static final int CREATE_ID = -8765; // magic number
+
+        private int mId;
+        final String mTag;
 
         private long mStartMs;
         private long mEndMs;
@@ -462,15 +596,18 @@ public final class JobRequest {
         private boolean mRequirementsEnforced;
         private boolean mRequiresCharging;
         private boolean mRequiresDeviceIdle;
+        private boolean mRequiresBatteryNotLow;
+        private boolean mRequiresStorageNotLow;
         private boolean mExact;
         private NetworkType mNetworkType;
 
         private PersistableBundleCompat mExtras;
         private String mExtrasXml;
 
-        private boolean mPersisted;
-
         private boolean mUpdateCurrent;
+
+        private boolean mTransient;
+        private Bundle mTransientExtras = Bundle.EMPTY;
 
         /**
          * Creates a new instance to build a {@link JobRequest}. Note that the {@code tag} doesn't
@@ -487,7 +624,7 @@ public final class JobRequest {
          */
         public Builder(@NonNull String tag) {
             mTag = JobPreconditions.checkNotEmpty(tag);
-            mId = JobManager.instance().getJobStorage().nextJobId();
+            mId = CREATE_ID;
 
             mStartMs = -1;
             mEndMs = -1;
@@ -498,32 +635,8 @@ public final class JobRequest {
             mNetworkType = DEFAULT_NETWORK_TYPE;
         }
 
-        private Builder(JobRequest request, boolean createId) {
-            mId = createId ? JobManager.instance().getJobStorage().nextJobId() : request.getJobId();
-            mTag = request.getTag();
-
-            mStartMs = request.getStartMs();
-            mEndMs = request.getEndMs();
-
-            mBackoffMs = request.getBackoffMs();
-            mBackoffPolicy = request.getBackoffPolicy();
-
-            mIntervalMs = request.getIntervalMs();
-            mFlexMs = request.getFlexMs();
-
-            mRequirementsEnforced = request.requirementsEnforced();
-            mRequiresCharging = request.requiresCharging();
-            mRequiresDeviceIdle = request.requiresDeviceIdle();
-            mExact = request.isExact();
-            mNetworkType = request.requiredNetworkType();
-
-            mExtras = request.mBuilder.mExtras;
-            mExtrasXml = request.mBuilder.mExtrasXml;
-            mPersisted = request.isPersisted();
-        }
-
         @SuppressWarnings("unchecked")
-        private Builder(Cursor cursor) throws Exception {
+        private Builder(Cursor cursor) {
             mId = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_ID));
             mTag = cursor.getString(cursor.getColumnIndex(JobStorage.COLUMN_TAG));
 
@@ -544,6 +657,8 @@ public final class JobRequest {
             mRequirementsEnforced = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_REQUIREMENTS_ENFORCED)) > 0;
             mRequiresCharging = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_REQUIRES_CHARGING)) > 0;
             mRequiresDeviceIdle = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_REQUIRES_DEVICE_IDLE)) > 0;
+            mRequiresBatteryNotLow = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_REQUIRES_BATTERY_NOT_LOW)) > 0;
+            mRequiresStorageNotLow = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_REQUIRES_STORAGE_NOT_LOW)) > 0;
             mExact = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_EXACT)) > 0;
             try {
                 mNetworkType = NetworkType.valueOf(cursor.getString(cursor.getColumnIndex(JobStorage.COLUMN_NETWORK_TYPE)));
@@ -553,8 +668,41 @@ public final class JobRequest {
             }
 
             mExtrasXml = cursor.getString(cursor.getColumnIndex(JobStorage.COLUMN_EXTRAS));
+            mTransient = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_TRANSIENT)) > 0;
+        }
 
-            mPersisted = cursor.getInt(cursor.getColumnIndex(JobStorage.COLUMN_PERSISTED)) > 0;
+        // copy constructor
+        private Builder(@NonNull Builder builder) {
+            this(builder, false);
+        }
+
+        private Builder(@NonNull Builder builder, boolean createId) {
+            mId = createId ? CREATE_ID : builder.mId;
+            mTag = builder.mTag;
+
+            mStartMs = builder.mStartMs;
+            mEndMs = builder.mEndMs;
+
+            mBackoffMs = builder.mBackoffMs;
+            mBackoffPolicy = builder.mBackoffPolicy;
+
+            mIntervalMs = builder.mIntervalMs;
+            mFlexMs = builder.mFlexMs;
+
+            mRequirementsEnforced = builder.mRequirementsEnforced;
+            mRequiresCharging = builder.mRequiresCharging;
+            mRequiresDeviceIdle = builder.mRequiresDeviceIdle;
+            mRequiresBatteryNotLow = builder.mRequiresBatteryNotLow;
+            mRequiresStorageNotLow = builder.mRequiresStorageNotLow;
+            mExact = builder.mExact;
+            mNetworkType = builder.mNetworkType;
+
+            mExtras = builder.mExtras;
+            mExtrasXml = builder.mExtrasXml;
+
+            mUpdateCurrent = builder.mUpdateCurrent;
+            mTransient = builder.mTransient;
+            mTransientExtras = builder.mTransientExtras;
         }
 
         private void fillContentValues(ContentValues contentValues) {
@@ -573,6 +721,8 @@ public final class JobRequest {
             contentValues.put(JobStorage.COLUMN_REQUIREMENTS_ENFORCED, mRequirementsEnforced);
             contentValues.put(JobStorage.COLUMN_REQUIRES_CHARGING, mRequiresCharging);
             contentValues.put(JobStorage.COLUMN_REQUIRES_DEVICE_IDLE, mRequiresDeviceIdle);
+            contentValues.put(JobStorage.COLUMN_REQUIRES_BATTERY_NOT_LOW, mRequiresBatteryNotLow);
+            contentValues.put(JobStorage.COLUMN_REQUIRES_STORAGE_NOT_LOW, mRequiresStorageNotLow);
             contentValues.put(JobStorage.COLUMN_EXACT, mExact);
             contentValues.put(JobStorage.COLUMN_NETWORK_TYPE, mNetworkType.toString());
 
@@ -581,7 +731,8 @@ public final class JobRequest {
             } else if (!TextUtils.isEmpty(mExtrasXml)) {
                 contentValues.put(JobStorage.COLUMN_EXTRAS, mExtrasXml);
             }
-            contentValues.put(JobStorage.COLUMN_PERSISTED, mPersisted);
+
+            contentValues.put(JobStorage.COLUMN_TRANSIENT, mTransient);
         }
 
         /**
@@ -594,8 +745,8 @@ public final class JobRequest {
          * <br>
          *
          * The window specified is treated as offset from now, e.g. the job will run between
-         * {@code System.currentTimeMillis() + startMs} and
-         * {@code System.currentTimeMillis() + endMs}.
+         * {@code System.currentTimeMillis() + startInMs} and
+         * {@code System.currentTimeMillis() + endInMs}.
          *
          * <br>
          * <br>
@@ -609,22 +760,22 @@ public final class JobRequest {
          *
          * <b>NOTE:</b> It's not recommended to have such big execution windows. The {@code AlarmManager} used
          * as fallback API doesn't allow setting a start date. Although being inexact, the execution time is
-         * the arithmetic average of {@code startMs} and {@code endMs}. The result could be that your job never
+         * the arithmetic average of {@code startInMs} and {@code endInMs}. The result could be that your job never
          * runs on pre Android 5.0 devices, if one argument is too large.
          *
-         * @param startMs Earliest point from which your task is eligible to run.
-         * @param endMs Latest point at which your task must be run.
+         * @param startInMs Earliest point from which your task is eligible to run.
+         * @param endInMs Latest point at which your task must be run.
          */
-        public Builder setExecutionWindow(long startMs, long endMs) {
-            mStartMs = JobPreconditions.checkArgumentPositive(startMs, "startMs must be greater than 0");
-            mEndMs = JobPreconditions.checkArgumentInRange(endMs, startMs, Long.MAX_VALUE, "endMs");
+        public Builder setExecutionWindow(long startInMs, long endInMs) {
+            mStartMs = JobPreconditions.checkArgumentPositive(startInMs, "startInMs must be greater than 0");
+            mEndMs = JobPreconditions.checkArgumentInRange(endInMs, startInMs, Long.MAX_VALUE, "endInMs");
 
             if (mStartMs > WINDOW_THRESHOLD_MAX) {
-                CAT.i("startMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mStartMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                CAT.i("startInMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mStartMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
                 mStartMs = WINDOW_THRESHOLD_MAX;
             }
             if (mEndMs > WINDOW_THRESHOLD_MAX) {
-                CAT.i("endMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mEndMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                CAT.i("endInMs reduced from %d days to %d days", TimeUnit.MILLISECONDS.toDays(mEndMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
                 mEndMs = WINDOW_THRESHOLD_MAX;
             }
 
@@ -643,6 +794,22 @@ public final class JobRequest {
             } else {
                 mExtras = new PersistableBundleCompat(extras);
             }
+            return this;
+        }
+
+        /**
+         * Adds optional extras. This is persisted, so only primitive types are allowed. This method overrides
+         * values with the same keys inside of {@code extras}, which were set before.
+         *
+         * @param extras Bundle containing extras which you can retrieve with {@link Job.Params#getExtras()}.
+         */
+        public Builder addExtras(@NonNull PersistableBundleCompat extras) {
+            if (mExtras == null) {
+                mExtras = extras;
+            } else {
+                mExtras.putAll(extras);
+            }
+            mExtrasXml = null;
             return this;
         }
 
@@ -738,6 +905,46 @@ public final class JobRequest {
         }
 
         /**
+         * Specify that to run this job, the device battery shouldn't be below a curtain threshold.
+         * The default is set to {@code false}.
+         *
+         * <br>
+         * <br>
+         *
+         * Note that if the deadline is met and the requirements aren't enforced, then your job
+         * will run and ignore this requirement.
+         *
+         * @param requiresBatteryNotLow Whether or not the device batter shouldn't be low.
+         * @see #setRequirementsEnforced(boolean)
+         * @see #setExecutionWindow(long, long)
+         */
+        public Builder setRequiresBatteryNotLow(boolean requiresBatteryNotLow) {
+            mRequiresBatteryNotLow = requiresBatteryNotLow;
+            return this;
+        }
+
+        /**
+         * Specify that to run this job, the device storage shouldn't be low.
+         * The default is set to {@code false}. <b>Note: </b>This requirement only has an
+         * affect on Android O, but not lower versions. It's never guaranteed that enough
+         * space is available, when your job runs. This is more like a hint.
+         *
+         * <br>
+         * <br>
+         *
+         * Note that if the deadline is met and the requirements aren't enforced, then your job
+         * will run and ignore this requirement.
+         *
+         * @param requiresStorageNotLow Whether or not the device storage shouldn't be low.
+         * @see #setRequirementsEnforced(boolean)
+         * @see #setExecutionWindow(long, long)
+         */
+        public Builder setRequiresStorageNotLow(boolean requiresStorageNotLow) {
+            mRequiresStorageNotLow = requiresStorageNotLow;
+            return this;
+        }
+
+        /**
          * Specify that the job should run at an exact time. This type of job must only be used
          * for situations where it is actually required that the alarm go off even while in idle.
          * A reasonable example would be for a calendar notification that should make a sound so
@@ -760,7 +967,7 @@ public final class JobRequest {
          * <br>
          *
          * The milliseconds specified are treated as offset from now, e.g. the job will run at
-         * {@code System.currentTimeMillis() + exactMs}.
+         * {@code System.currentTimeMillis() + exactInMs}.
          *
          * <br>
          * <br>
@@ -769,18 +976,37 @@ public final class JobRequest {
          * No exception is thrown if the argument is greater than the maximum value, the argument is
          * silently being clamped.
          *
-         * @param exactMs The exact offset when the job should run from when the job was scheduled.
+         * @param exactInMs The exact offset when the job should run from when the job was scheduled.
          * @see AlarmManager#setExact(int, long, android.app.PendingIntent)
          * @see AlarmManager#setExactAndAllowWhileIdle(int, long, android.app.PendingIntent)
          */
-        public Builder setExact(long exactMs) {
+        public Builder setExact(long exactInMs) {
             mExact = true;
-            if (exactMs > WINDOW_THRESHOLD_MAX) {
-                CAT.i("exactMs clamped from %d days to %d days", TimeUnit.MILLISECONDS.toDays(exactMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
-                exactMs = WINDOW_THRESHOLD_MAX;
+            if (exactInMs > WINDOW_THRESHOLD_MAX) {
+                CAT.i("exactInMs clamped from %d days to %d days", TimeUnit.MILLISECONDS.toDays(exactInMs), TimeUnit.MILLISECONDS.toDays(WINDOW_THRESHOLD_MAX));
+                exactInMs = WINDOW_THRESHOLD_MAX;
             }
 
-            return setExecutionWindow(exactMs, exactMs);
+            return setExecutionWindow(exactInMs, exactInMs);
+        }
+
+        /**
+         * Specify that the job should start immediately. This is similar to an exact job and has
+         * the same constraints, e.g. no other requirements like a specific network condition
+         * are allowed. This method overrides any specified time window.
+         *
+         * <br>
+         * <br>
+         *
+         * The advantage if a job that starts immediately compared to implementing your own
+         * {@link Service} is that jobs run in parallel and can be rescheduled if necessary. It
+         * also respect the background execution limit introduced in Android O, meaning that if
+         * it's not allowed to start a {@link Service}, then the work is delayed.
+         *
+         * @see #setExact(long)
+         */
+        public Builder startNow() {
+            return setExact(START_NOW);
         }
 
         /**
@@ -846,27 +1072,11 @@ public final class JobRequest {
         }
 
         /**
-         * Set whether the job should be persisted across reboots. This will only have an
-         * effect if your application holds the permission
-         * {@link android.Manifest.permission#RECEIVE_BOOT_COMPLETED}. Otherwise an exception will
-         * be thrown. The default is set to {@code false}.
-         *
-         * @param persisted If {@code true} the job is scheduled after a reboot.
-         */
-        public Builder setPersisted(boolean persisted) {
-            if (persisted && !JobUtil.hasBootPermission(JobManager.instance().getContext())) {
-                throw new IllegalStateException("Does not have RECEIVE_BOOT_COMPLETED permission, which is mandatory for this feature");
-            }
-            mPersisted = persisted;
-            return this;
-        }
-
-        /**
          * Sets whether this request should overwrite any preexisting jobs with the same tag. If {@code true},
          * then this request calls {@link JobManager#cancelAllForTag(String)} with the given tag before
          * being scheduled.
          *
-         * @param updateCurrent If {code true} this request will cancel any preexisting job with the same tag
+         * @param updateCurrent If {@code true} this request will cancel any preexisting job with the same tag
          *                      while being scheduled.
          */
         public Builder setUpdateCurrent(boolean updateCurrent) {
@@ -875,10 +1085,28 @@ public final class JobRequest {
         }
 
         /**
+         * Set optional transient extras. <b>WARNING:</b> It's not guaranteed that a transient job will
+         * run at all, e.g. rebooting the device or force closing the app will cancel the job. This is
+         * only helpful for jobs which should start soon and can be cancelled automatically.
+         *
+         * <br>
+         * <br>
+         *
+         * If the passed in bundle is {@code null} or empty, then the previous extras are reset to the default
+         * and the job won't be transient.
+         *
+         * @param extras  Bundle containing extras you want the scheduler to hold on to for you.
+         */
+        public Builder setTransientExtras(@Nullable Bundle extras) {
+            mTransient = extras != null && !extras.isEmpty();
+            mTransientExtras = mTransient ? new Bundle(extras) : Bundle.EMPTY;
+            return this;
+        }
+
+        /**
          * @return The {@link JobRequest} with this parameters to hand to the {@link JobManager}.
          */
         public JobRequest build() {
-            JobPreconditions.checkArgumentNonnegative(mId, "id can't be negative");
             JobPreconditions.checkNotEmpty(mTag);
             JobPreconditions.checkArgumentPositive(mBackoffMs, "backoffMs must be > 0");
             JobPreconditions.checkNotNull(mBackoffPolicy);
@@ -901,7 +1129,8 @@ public final class JobRequest {
             if (mExact && mStartMs != mEndMs) {
                 throw new IllegalArgumentException("Can't call setExecutionWindow() for an exact job.");
             }
-            if (mExact && (mRequirementsEnforced || mRequiresDeviceIdle || mRequiresCharging || !DEFAULT_NETWORK_TYPE.equals(mNetworkType))) {
+            if (mExact && (mRequirementsEnforced || mRequiresDeviceIdle || mRequiresCharging || !DEFAULT_NETWORK_TYPE.equals(mNetworkType)
+                    || mRequiresBatteryNotLow || mRequiresStorageNotLow)) {
                 throw new IllegalArgumentException("Can't require any condition for an exact job.");
             }
 
@@ -917,10 +1146,24 @@ public final class JobRequest {
             }
 
             if (mIntervalMs <= 0 && (mStartMs > WINDOW_THRESHOLD_WARNING || mEndMs > WINDOW_THRESHOLD_WARNING)) {
-                CAT.w("Attention: your execution window is too large. This could result in undesired behavior, see https://github.com/evernote/android-job/blob/master/FAQ.md");
+                CAT.w("Attention: your execution window is too large. This could result in undesired behavior, see https://github.com/evernote/android-job/wiki/FAQ");
             }
 
-            return new JobRequest(this);
+            if (mIntervalMs <= 0 && (mStartMs > TimeUnit.DAYS.toMillis(365))) {
+                CAT.w("Warning: job with tag %s scheduled over a year in the future", mTag);
+            }
+
+            if (mId != CREATE_ID) {
+                JobPreconditions.checkArgumentNonnegative(mId, "id can't be negative");
+            }
+
+            Builder builder = new Builder(this);
+            if (mId == CREATE_ID) {
+                builder.mId = JobManager.instance().getJobStorage().nextJobId();
+                JobPreconditions.checkArgumentNonnegative(builder.mId, "id can't be negative");
+            }
+
+            return new JobRequest(builder);
         }
 
         @Override
@@ -952,7 +1195,7 @@ public final class JobRequest {
 
     public enum NetworkType {
         /**
-         * Network must not be connected.
+         * Network does not have to be connected.
          */
         ANY,
         /**
@@ -966,6 +1209,29 @@ public final class JobRequest {
         /**
          * Network must be connected and not roaming, but can be metered.
          */
-        NOT_ROAMING
+        NOT_ROAMING,
+        /**
+         * This job requires metered connectivity such as most cellular data networks.
+         */
+        METERED
+    }
+
+    /**
+     * Callback that is used when scheduling a {@link JobRequest} asynchronously on a background thread.
+     */
+    public interface JobScheduledCallback {
+        /**
+         * The job ID in case scheduling the request failed.
+         */
+        int JOB_ID_ERROR = -1;
+
+        /**
+         * Called after your request was scheduled.
+         *
+         * @param jobId The unique ID of your new scheduled {@link JobRequest}. Or {@link #JOB_ID_ERROR} in case of a failure.
+         * @param tag The tag of the scheduled request.
+         * @param exception If scheduling the request failed, then the exception won't be {@code null}.
+         */
+        void onJobScheduled(int jobId, @NonNull String tag, @Nullable Exception exception);
     }
 }

@@ -1,26 +1,41 @@
+/*
+ * Copyright (C) 2018 Evernote Corporation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.evernote.android.job;
 
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.os.PowerManager;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.RestrictTo;
 import android.util.SparseArray;
 
 import com.evernote.android.job.util.JobCat;
 import com.evernote.android.job.util.JobUtil;
-
-import net.vrallev.android.cat.CatLog;
 
 import java.util.concurrent.TimeUnit;
 
 /**
  * @author rwondratschek
  */
+@RestrictTo(RestrictTo.Scope.LIBRARY)
 /*package*/ final class WakeLockUtil {
 
-    private static final CatLog CAT = new JobCat("WakeLockUtil");
+    private static final JobCat CAT = new JobCat("WakeLockUtil");
 
     private static final String EXTRA_WAKE_LOCK_ID = "com.evernote.android.job.wakelockid";
 
@@ -28,8 +43,9 @@ import java.util.concurrent.TimeUnit;
         // no op
     }
 
+    @SuppressWarnings("SameParameterValue")
     @Nullable
-    public static PowerManager.WakeLock acquireWakeLock(@NonNull Context context, @NonNull String tag, long timeoutMillis) {
+    static PowerManager.WakeLock acquireWakeLock(@NonNull Context context, @NonNull String tag, long timeoutMillis) {
         PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
 
         PowerManager.WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag);
@@ -38,7 +54,7 @@ import java.util.concurrent.TimeUnit;
         return acquireWakeLock(context, wakeLock, timeoutMillis) ? wakeLock : null;
     }
 
-    public static boolean acquireWakeLock(@NonNull Context context, @Nullable PowerManager.WakeLock wakeLock, long timeoutMillis) {
+    static boolean acquireWakeLock(@NonNull Context context, @Nullable PowerManager.WakeLock wakeLock, long timeoutMillis) {
         if (wakeLock != null && !wakeLock.isHeld() && JobUtil.hasWakeLockPermission(context)) {
             // Even if we have the permission, some devices throw an exception in the try block nonetheless,
             // I'm looking at you, Samsung SM-T805
@@ -55,7 +71,7 @@ import java.util.concurrent.TimeUnit;
         return false;
     }
 
-    public static void releaseWakeLock(@Nullable PowerManager.WakeLock wakeLock) {
+    static void releaseWakeLock(@Nullable PowerManager.WakeLock wakeLock) {
         try {
             if (wakeLock != null && wakeLock.isHeld()) {
                 wakeLock.release();

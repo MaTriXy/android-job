@@ -1,35 +1,38 @@
 apply plugin: 'com.android.library'
-apply plugin: 'com.github.ben-manes.versions'
 apply from: '../build-config/gradle-quality.gradle'
 
-archivesBaseName = 'android-job'
-
 dependencies {
-    provided "com.google.android.gms:play-services-gcm:$playServicesVersion"
+    compileOnly "com.google.android.gms:play-services-gcm:$playServicesVersion"
+    compileOnly "androidx.work:work-runtime:$workVersion"
 
-    //noinspection GradleDependency
-    compile "com.android.support:support-annotations:$supportLibVersion"
-    compile 'net.vrallev.android:cat:1.0.5'
+    //noinspection GradleCompatible,GradleDependency
+    api 'androidx.core:core:1.7.0'
 
-    androidTestCompile 'com.android.support.test:runner:0.5'
-    androidTestCompile 'com.android.support.test:rules:0.5'
-    androidTestCompile 'com.android.support.test.espresso:espresso-core:2.2.2'
-    androidTestCompile 'com.squareup.assertj:assertj-android:1.1.1'
-    androidTestCompile "com.google.android.gms:play-services-gcm:$playServicesVersion"
+    androidTestImplementation 'androidx.test:runner:1.4.0'
+    androidTestImplementation 'androidx.test:rules:1.4.0'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.3.0'
+    androidTestImplementation 'com.squareup.assertj:assertj-android:1.1.1'
+    androidTestImplementation "com.google.android.gms:play-services-gcm:$playServicesVersion"
+    androidTestImplementation "androidx.work:work-runtime:$workVersion"
+    androidTestImplementation "androidx.work:work-testing:$workVersion"
 
-    androidTestCompile "com.facebook.stetho:stetho:$stethoVersion"
+    androidTestImplementation "com.facebook.stetho:stetho:$stethoVersion"
+    androidTestImplementation 'androidx.appcompat:appcompat:1.3.1'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.1'
 
-    testCompile "junit:junit:$junitVersion"
-    testCompile "org.mockito:mockito-core:$mockitoVersion"
-    testCompile "org.assertj:assertj-core:$assertjVersion"
-    testCompile "org.robolectric:robolectric:$robolectricVersion"
+    testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.mockito:mockito-core:$mockitoVersion"
+    testImplementation "org.assertj:assertj-core:$assertjVersion"
+    testImplementation "org.robolectric:robolectric:$robolectricVersion"
+    testImplementation 'androidx.test:core:1.4.0'
 }
 
 android {
     compileSdkVersion rootProject.ext.compileSdkVersion
-    buildToolsVersion rootProject.ext.buildToolsVersion
 
     resourcePrefix 'job_'
+
+    useLibrary 'android.test.mock'
 
     defaultConfig {
         minSdkVersion rootProject.ext.minSdkVersion
@@ -38,9 +41,9 @@ android {
         versionName project.VERSION_NAME
         versionCode Integer.parseInt(project.VERSION_CODE)
 
-        consumerProguardFiles 'proguard.txt'
+        consumerProguardFiles 'proguard.cfg'
 
-        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -54,11 +57,16 @@ android {
 
     testOptions {
         unitTests.returnDefaultValues = true
+        unitTests.includeAndroidResources = true
         unitTests.all {
             testLogging {
                 events 'passed', 'skipped', 'failed', 'standardOut', 'standardError'
             }
         }
+    }
+
+    packagingOptions {
+        exclude 'META-INF/proguard/androidx-annotations.pro'
     }
 }
 

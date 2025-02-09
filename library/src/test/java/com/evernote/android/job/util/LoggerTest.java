@@ -1,9 +1,9 @@
 package com.evernote.android.job.util;
 
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
-import net.vrallev.android.cat.print.CatPrinter;
+import com.evernote.android.job.JobConfig;
 
 import org.junit.After;
 import org.junit.FixMethodOrder;
@@ -41,23 +41,23 @@ public class LoggerTest {
 
     @Test
     public void testAddIsIdempotent() {
-        TestPrinter printer = new TestPrinter();
-        assertThat(JobCat.addLogPrinter(printer)).isTrue();
-        assertThat(JobCat.addLogPrinter(printer)).isFalse();
+        TestLogger printer = new TestLogger();
+        assertThat(JobConfig.addLogger(printer)).isTrue();
+        assertThat(JobConfig.addLogger(printer)).isFalse();
     }
 
     @Test
     public void testRemove() {
-        TestPrinter printer = new TestPrinter();
-        assertThat(JobCat.addLogPrinter(printer)).isTrue();
-        JobCat.removeLogPrinter(printer);
-        assertThat(JobCat.addLogPrinter(printer)).isTrue();
+        TestLogger printer = new TestLogger();
+        assertThat(JobConfig.addLogger(printer)).isTrue();
+        JobConfig.removeLogger(printer);
+        assertThat(JobConfig.addLogger(printer)).isTrue();
     }
 
     @Test
     public void testSingleCustomLoggerAddBefore() {
-        TestPrinter printer = new TestPrinter();
-        assertThat(JobCat.addLogPrinter(printer)).isTrue();
+        TestLogger printer = new TestLogger();
+        assertThat(JobConfig.addLogger(printer)).isTrue();
 
         JobCat cat = new JobCat("Tag");
         cat.d("hello");
@@ -70,8 +70,8 @@ public class LoggerTest {
     public void testSingleCustomLoggerAddAfter() {
         JobCat cat = new JobCat("Tag");
 
-        TestPrinter printer = new TestPrinter();
-        assertThat(JobCat.addLogPrinter(printer)).isTrue();
+        TestLogger printer = new TestLogger();
+        assertThat(JobConfig.addLogger(printer)).isTrue();
 
         cat.d("hello");
         cat.w("world");
@@ -83,10 +83,10 @@ public class LoggerTest {
     public void test100Loggers() {
         JobCat cat1 = new JobCat("Tag1");
 
-        List<TestPrinter> printers = new ArrayList<>();
+        List<TestLogger> printers = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
-            TestPrinter printer = new TestPrinter();
-            assertThat(JobCat.addLogPrinter(printer)).isTrue();
+            TestLogger printer = new TestLogger();
+            assertThat(JobConfig.addLogger(printer)).isTrue();
             printers.add(printer);
         }
 
@@ -95,16 +95,16 @@ public class LoggerTest {
         cat1.d("hello");
         cat2.w("world");
 
-        for (TestPrinter printer : printers) {
+        for (TestLogger printer : printers) {
             assertThat(printer.mTags).containsExactly("Tag1", "Tag2");
             assertThat(printer.mMessages).containsExactly("hello", "world");
         }
 
-        TestPrinter removedPrinter = printers.remove(50);
-        JobCat.removeLogPrinter(removedPrinter);
+        TestLogger removedPrinter = printers.remove(50);
+        JobConfig.removeLogger(removedPrinter);
 
         cat1.d("third");
-        for (TestPrinter printer : printers) {
+        for (TestLogger printer : printers) {
             assertThat(printer.mTags).containsExactly("Tag1", "Tag2", "Tag1");
             assertThat(printer.mMessages).containsExactly("hello", "world", "third");
         }
@@ -112,30 +112,13 @@ public class LoggerTest {
         assertThat(removedPrinter.mMessages).containsExactly("hello", "world");
     }
 
-    @Test
-    public void testNotVerboseLogging() {
-        JobCat cat = new JobCat("Tag");
-
-        TestPrinter fakeLogcatPrinter = new TestPrinter();
-        cat.addPrinter(fakeLogcatPrinter); // in this list logcat is enabled
-
-        cat.d("hello");
-
-        assertThat(fakeLogcatPrinter.mMessages).containsExactly("hello");
-
-        JobCat.setLogcatEnabled(false);
-
-        cat.d("world");
-        assertThat(fakeLogcatPrinter.mMessages).containsExactly("hello");
-    }
-
-    private static final class TestPrinter implements CatPrinter {
+    private static final class TestLogger implements JobLogger {
 
         private final List<String> mTags = new ArrayList<>();
         private final List<String> mMessages = new ArrayList<>();
 
         @Override
-        public void println(int priority, @NonNull String tag, @NonNull String message, @Nullable Throwable t) {
+        public void log(int priority, @NonNull String tag, @NonNull String message, @Nullable Throwable t) {
             mTags.add(tag);
             mMessages.add(message);
         }

@@ -1,12 +1,12 @@
 package com.evernote.android.job;
 
-import android.support.annotation.NonNull;
+import android.content.Context;
+import androidx.annotation.NonNull;
+import androidx.core.app.JobIntentServiceReset;
 
-import com.evernote.android.job.test.TestCat;
-import com.evernote.android.job.util.JobCat;
+import com.evernote.android.job.test.TestLogger;
 
 import org.junit.rules.ExternalResource;
-import org.robolectric.RuntimeEnvironment;
 
 /**
  * @author rwondratschek
@@ -15,15 +15,22 @@ public final class JobManagerRule extends ExternalResource {
 
     private JobManager mManager;
     private final JobCreator mJobCreator;
+    private final Context mContext;
 
-    public JobManagerRule(@NonNull JobCreator jobCreator) {
+    public JobManagerRule(@NonNull JobCreator jobCreator, @NonNull Context context) {
         mJobCreator = jobCreator;
+        mContext = context;
     }
 
     @Override
     protected void before() throws Throwable {
-        JobCat.addLogPrinter(TestCat.INSTANCE);
-        mManager = JobManager.create(RuntimeEnvironment.application);
+        JobIntentServiceReset.reset();
+
+        JobConfig.addLogger(TestLogger.INSTANCE);
+        JobConfig.setSkipJobReschedule(true);
+        JobConfig.setCloseDatabase(true);
+
+        mManager = JobManager.create(mContext);
         mManager.addJobCreator(mJobCreator);
     }
 
@@ -31,14 +38,10 @@ public final class JobManagerRule extends ExternalResource {
     protected void after() {
         mManager.cancelAll();
         mManager.destroy();
-        JobCat.removeLogPrinter(TestCat.INSTANCE);
+        JobConfig.reset();
     }
 
     public JobManager getJobManager() {
         return mManager;
-    }
-
-    public void setJobFinished() {
-        mManager.removeJobCreator(mJobCreator);
     }
 }

@@ -1,27 +1,17 @@
 /*
- * Copyright 2007-present Evernote Corporation.
- * All rights reserved.
+ * Copyright (C) 2018 Evernote Corporation
  *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
+ *       http://www.apache.org/licenses/LICENSE-2.0
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
- * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
- * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package com.evernote.android.job;
 
@@ -33,21 +23,23 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ResolveInfo;
-import android.os.Build;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import android.text.TextUtils;
+import android.util.SparseArray;
 
-import com.evernote.android.job.util.JobApi;
 import com.evernote.android.job.util.JobCat;
 import com.evernote.android.job.util.JobPreconditions;
 import com.evernote.android.job.util.JobUtil;
 import com.google.android.gms.gcm.GcmNetworkManager;
 
-import net.vrallev.android.cat.CatLog;
-
+import java.lang.ref.WeakReference;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Entry point for scheduling jobs. Depending on the platform and SDK version it uses different APIs
@@ -80,7 +72,7 @@ import java.util.Set;
 @SuppressWarnings({"unused", "WeakerAccess"})
 public final class JobManager {
 
-    private static final CatLog CAT = new JobCat("JobManager");
+    private static final JobCat CAT = new JobCat("JobManager");
 
     @SuppressLint("StaticFieldLeak")
     private static volatile JobManager instance;
@@ -91,8 +83,9 @@ public final class JobManager {
      *
      * @param context Any {@link Context} to instantiate the singleton object.
      * @return The new or existing singleton object.
+     * @throws JobManagerCreateException When the singleton couldn't be created.
      */
-    public static JobManager create(@NonNull Context context) {
+    public static JobManager create(@NonNull Context context) throws JobManagerCreateException {
         if (instance == null) {
             synchronized (JobManager.class) {
                 if (instance == null) {
@@ -101,6 +94,11 @@ public final class JobManager {
                     if (context.getApplicationContext() != null) {
                         // could be null in unit tests
                         context = context.getApplicationContext();
+                    }
+
+                    JobApi api = JobApi.getDefault(context);
+                    if (api == JobApi.V_14 && !api.isSupported(context)) {
+                        throw new JobManagerCreateException("All APIs are disabled, cannot schedule any job");
                     }
 
                     instance = new JobManager(context);
@@ -115,31 +113,6 @@ public final class JobManager {
                     sendAddJobCreatorIntent(context);
                 }
             }
-        }
-
-        return instance;
-    }
-
-    /**
-     * Initializes the singleton. It's necessary to call this function before using the {@code JobManager}.
-     * Calling it multiple times has not effect.
-     *
-     * @param context    Any {@link Context} to instantiate the singleton object.
-     * @param jobCreator The mapping between a specific job tag and the job class.
-     * @return The new or existing singleton object.
-     * @deprecated Use {@link #create(Context)} instead and call {@link #addJobCreator(JobCreator)} after that.
-     */
-    @Deprecated
-    public static JobManager create(Context context, JobCreator jobCreator) {
-        boolean addJobCreator;
-        synchronized (JobManager.class) {
-            addJobCreator = instance == null;
-        }
-
-        create(context);
-
-        if (addJobCreator) {
-            instance.addJobCreator(jobCreator);
         }
 
         return instance;
@@ -165,46 +138,47 @@ public final class JobManager {
 
     private final Context mContext;
     private final JobCreatorHolder mJobCreatorHolder;
-    private final JobStorage mJobStorage;
     private final JobExecutor mJobExecutor;
-    private final Config mConfig;
 
-    private JobApi mApi;
+    private volatile JobStorage mJobStorage;
+    private final CountDownLatch mJobStorageLatch;
 
-    private JobManager(Context context) {
+    private JobManager(final Context context) {
         mContext = context;
         mJobCreatorHolder = new JobCreatorHolder();
-        mJobStorage = new JobStorage(context);
         mJobExecutor = new JobExecutor();
-        mConfig = new Config();
 
-        setJobProxy(JobApi.getDefault(mContext, mConfig.isGcmApiEnabled()));
+        if (!JobConfig.isSkipJobReschedule()) {
+            JobRescheduleService.startService(mContext);
+        }
 
-        JobRescheduleService.startService(mContext);
-    }
-
-    /**
-     * @return The current configuration for the job manager.
-     */
-    public Config getConfig() {
-        return mConfig;
-    }
-
-    private void setJobProxy(JobApi api) {
-        mApi = api;
+        mJobStorageLatch = new CountDownLatch(1);
+        new Thread("AndroidJob-storage-init") {
+            @Override
+            public void run() {
+                mJobStorage = new JobStorage(context);
+                mJobStorageLatch.countDown();
+            }
+        }.start();
     }
 
     /**
      * Schedule a request which will be executed in the future. If you want to update an existing
      * {@link JobRequest}, call {@link JobRequest#cancelAndEdit()}, update your parameters and call
-     * this method again. Note that after a {@link JobRequest} was updated, it has a new unique ID.
-     * {@code JobRequest}
+     * this method again. Calling this method with the same request multiple times without cancelling
+     * it is idempotent.
      *
-     * @param request The {@link JobRequest} which will be run in the future.
+     * @param request The {@link JobRequest} which will run in the future.
      */
-    public void schedule(@NonNull JobRequest request) {
+    public synchronized void schedule(@NonNull JobRequest request) {
+        // call must be synchronized, otherwise with isUpdateCurrent() true it's possible to end up in a race condition with multiple jobs scheduled
+
         if (mJobCreatorHolder.isEmpty()) {
             CAT.w("you haven't registered a JobCreator with addJobCreator(), it's likely that your job never will be executed");
+        }
+
+        if (request.getScheduledAt() > 0) {
+            return;
         }
 
         if (request.isUpdateCurrent()) {
@@ -217,15 +191,48 @@ public final class JobManager {
         boolean periodic = request.isPeriodic();
         boolean flexSupport = periodic && jobApi.isFlexSupport() && request.getFlexMs() < request.getIntervalMs();
 
-        if (jobApi == JobApi.GCM && !mConfig.isGcmApiEnabled()) {
-            // shouldn't happen
-            CAT.w("GCM API disabled, but used nonetheless");
+        request.setScheduledAt(JobConfig.getClock().currentTimeMillis());
+        request.setFlexSupport(flexSupport);
+        getJobStorage().put(request);
+
+        try {
+            scheduleWithApi(request, jobApi, periodic, flexSupport);
+            return;
+        } catch (JobProxyIllegalStateException e) {
+            // try again below, the other cases stop
+
+        } catch (Exception e) {
+            // if something fails, don't keep the job in the database, it would be rescheduled later
+            getJobStorage().remove(request);
+            throw e;
         }
 
-        request.setScheduledAt(System.currentTimeMillis());
-        request.setFlexSupport(flexSupport);
-        mJobStorage.put(request);
+        try {
+            // try to reload the proxy
+            jobApi.invalidateCachedProxy();
 
+            scheduleWithApi(request, jobApi, periodic, flexSupport);
+            return;
+        } catch (Exception e) {
+            if (jobApi == JobApi.V_14 || jobApi == JobApi.V_19) {
+                // at this stage we cannot do anything
+                getJobStorage().remove(request);
+                throw e;
+            } else {
+                jobApi = JobApi.V_19.isSupported(mContext) ? JobApi.V_19 : JobApi.V_14; // try one last time
+            }
+        }
+
+        try {
+            scheduleWithApi(request, jobApi, periodic, flexSupport);
+        } catch (Exception e) {
+            // if something fails, don't keep the job in the database, it would be rescheduled later
+            getJobStorage().remove(request);
+            throw e;
+        }
+    }
+
+    private void scheduleWithApi(JobRequest request, JobApi jobApi, boolean periodic, boolean flexSupport) {
         JobProxy proxy = getJobProxy(jobApi);
         if (periodic) {
             if (flexSupport) {
@@ -243,12 +250,18 @@ public final class JobManager {
      * @return The {@link JobRequest} if it's pending or {@code null} otherwise.
      */
     public JobRequest getJobRequest(int jobId) {
-        return getJobRequest(jobId, false);
+        JobRequest request = getJobRequest(jobId, false);
+        if (request != null && request.isTransient() && !request.getJobApi().getProxy(mContext).isPlatformJobScheduled(request)) {
+            getJobStorage().remove(request);
+            return null;
+        } else {
+            return request;
+        }
     }
 
-    /*package*/ JobRequest getJobRequest(int jobId, boolean includeTransient) {
-        JobRequest jobRequest = mJobStorage.get(jobId);
-        if (!includeTransient && jobRequest != null && jobRequest.isTransient()) {
+    /*package*/ JobRequest getJobRequest(int jobId, boolean includeStarted) {
+        JobRequest jobRequest = getJobStorage().get(jobId);
+        if (!includeStarted && jobRequest != null && jobRequest.isStarted()) {
             return null;
         } else {
             return jobRequest;
@@ -263,7 +276,7 @@ public final class JobManager {
      */
     @NonNull
     public Set<JobRequest> getAllJobRequests() {
-        return mJobStorage.getAllJobRequests(null, false);
+        return getAllJobRequests(null, false, true);
     }
 
     /**
@@ -273,12 +286,31 @@ public final class JobManager {
      * direct effects to the actual backing store.
      */
     public Set<JobRequest> getAllJobRequestsForTag(@NonNull String tag) {
-        return mJobStorage.getAllJobRequests(tag, false);
+        return getAllJobRequests(tag, false, true);
+    }
+
+    /*package*/ Set<JobRequest> getAllJobRequests(@Nullable String tag, boolean includeStarted, boolean cleanUpTransient) {
+        Set<JobRequest> requests = getJobStorage().getAllJobRequests(tag, includeStarted);
+
+        if (cleanUpTransient) {
+            Iterator<JobRequest> iterator = requests.iterator();
+            while (iterator.hasNext()) {
+                JobRequest request = iterator.next();
+                if (request.isTransient() && !request.getJobApi().getProxy(mContext).isPlatformJobScheduled(request)) {
+                    getJobStorage().remove(request);
+                    iterator.remove();
+                }
+            }
+        }
+
+        return requests;
     }
 
     /**
      * Jobs are cached in memory even if they already have finished. But finished jobs are never
-     * restored after the app has launched.
+     * restored after the app has launched. Since finished jobs could cause memory leaks, they wrapped
+     * inside of a {@link WeakReference} and can be removed from memory. If you need to know the results
+     * of finished jobs or whether a job has been run, you can call {@link #getAllJobResults()}.
      *
      * @param jobId The unique ID of the running or finished {@link Job}.
      * @return The {@link Job} if it's running or has been finished and is still cached. Returns
@@ -290,7 +322,9 @@ public final class JobManager {
 
     /**
      * Jobs are cached in memory even if they already have finished. But finished jobs are never
-     * restored after the app has relaunched.
+     * restored after the app has relaunched. Since finished jobs could cause memory leaks, they wrapped
+     * inside of a {@link WeakReference} and can be removed from memory. If you need to know the results
+     * of finished jobs or whether a job has been run, you can call {@link #getAllJobResults()}.
      *
      * @return A duplicate {@link Set} containing all running and cached finished jobs or an empty set.
      * Never returns {@code null}. The set may be modified without direct effects to the actual
@@ -303,7 +337,9 @@ public final class JobManager {
 
     /**
      * Jobs are cached in memory even if they already have finished. But finished jobs are never
-     * restored after the app has relaunched.
+     * restored after the app has relaunched. Since finished jobs could cause memory leaks, they wrapped
+     * inside of a {@link WeakReference} and can be removed from memory. If you need to know the results
+     * of finished jobs or whether a job has been run, you can call {@link #getAllJobResults()}.
      *
      * @param tag The tag of the running or finished jobs.
      * @return A duplicate {@link Set} containing all running and cached finished jobs associated with
@@ -316,24 +352,15 @@ public final class JobManager {
     }
 
     /**
-     * <b>WARNING:</b> You shouldn't call this method. It only exists for testing and debugging
-     * purposes. The {@link JobManager} automatically decides which API suits best for a {@link Job}.
+     * Finished jobs are kept in memory until the garbage collector cleans them up. This method returns
+     * the results of all finished jobs even after they have been cleaned up. However, neither finished jobs
+     * nor their results are restored after the app has been relaunched.
      *
-     * @param api The {@link JobApi} which will be used for future scheduled JobRequests.
+     * @return The results of all finished jobs. They key is the corresponding job ID.
      */
-    public void forceApi(@NonNull JobApi api) {
-        setJobProxy(JobPreconditions.checkNotNull(api));
-        CAT.w("Changed API to %s", api);
-    }
-
-    /**
-     * <b>WARNING:</b> Don't rely your logic on a specific {@link JobApi}. You shouldn't be worrying
-     * about it.
-     *
-     * @return The current {@link JobApi} which will be used for future schedules JobRequests.
-     */
-    public JobApi getApi() {
-        return mApi;
+    @NonNull
+    public SparseArray<Job.Result> getAllJobResults() {
+        return mJobExecutor.getAllJobResults();
     }
 
     /**
@@ -371,8 +398,9 @@ public final class JobManager {
     private boolean cancelInner(@Nullable JobRequest request) {
         if (request != null) {
             CAT.i("Found pending job %s, canceling", request);
-            getJobProxy(request).cancel(request.getJobId());
+            getJobProxy(request.getJobApi()).cancel(request.getJobId());
             getJobStorage().remove(request);
+            request.setScheduledAt(0); // reset value
             return true;
         } else {
             return false;
@@ -380,19 +408,18 @@ public final class JobManager {
     }
 
     private boolean cancelInner(@Nullable Job job) {
-        if (job != null && !job.isFinished() && !job.isCanceled()) {
+        if (job != null && job.cancel(true)) {
             CAT.i("Cancel running %s", job);
-            job.cancel();
             return true;
         } else {
             return false;
         }
     }
 
-    private int cancelAllInner(@Nullable String tag) {
+    private synchronized int cancelAllInner(@Nullable String tag) {
         int canceled = 0;
 
-        Set<JobRequest> requests = mJobStorage.getAllJobRequests(tag, true);
+        Set<JobRequest> requests = getAllJobRequests(tag, true, false);
         for (JobRequest request : requests) {
             if (cancelInner(request)) {
                 canceled++;
@@ -407,17 +434,6 @@ public final class JobManager {
             }
         }
         return canceled;
-    }
-
-    /**
-     * Global switch to enable or disable logging.
-     *
-     * @param verbose Whether or not to print log messages.
-     * @deprecated Use {@link Config#setVerbose(boolean)} instead.
-     */
-    @Deprecated
-    public void setVerbose(boolean verbose) {
-        mConfig.setVerbose(verbose);
     }
 
     /**
@@ -439,7 +455,19 @@ public final class JobManager {
         mJobCreatorHolder.removeJobCreator(jobCreator);
     }
 
+    @NonNull
     /*package*/ JobStorage getJobStorage() {
+        if (mJobStorage == null) {
+            try {
+                mJobStorageLatch.await(20, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        if (mJobStorage == null) {
+            throw new IllegalStateException("Job storage shouldn't be null");
+        }
+
         return mJobStorage;
     }
 
@@ -458,112 +486,30 @@ public final class JobManager {
     /*package*/ void destroy() {
         synchronized (JobManager.class) {
             instance = null;
+            for (JobApi api : JobApi.values()) {
+                api.invalidateCachedProxy();
+            }
         }
     }
 
-    /*package*/ JobProxy getJobProxy(JobRequest request) {
-        return getJobProxy(request.getJobApi());
-    }
-
-    private JobProxy getJobProxy(JobApi api) {
-        return api.getCachedProxy(mContext);
-    }
-
-    // TODO: extract this class so that settings can be changed before the JobManager has been created
-    public final class Config {
-
-        private boolean mGcmEnabled;
-        private boolean mAllowSmallerIntervals;
-
-        private Config() {
-            mGcmEnabled = true;
-            mAllowSmallerIntervals = false;
-        }
-
-        /**
-         * @return Whether logging is enabled for this library. The default value is {@code true}.
-         */
-        public boolean isVerbose() {
-            return JobCat.isLogcatEnabled();
-        }
-
-        /**
-         * Global switch to enable or disable logging.
-         *
-         * @param verbose Whether or not to print all log messages. The default value is {@code true}.
-         */
-        public void setVerbose(boolean verbose) {
-            JobCat.setLogcatEnabled(verbose);
-        }
-
-        /**
-         * @return Whether the GCM API is enabled. The API is only used if the required class dependency
-         * is found, the Google Play Services are available and this setting is {@code true}. The default
-         * value is {@code true}.
-         */
-        public boolean isGcmApiEnabled() {
-            return mGcmEnabled;
-        }
-
-        /**
-         * Programmatic switch to disable the GCM API. If {@code false}, then the {@link AlarmManager} will
-         * be used for Android 4 devices in all cases.
-         *
-         * @param enabled Whether the GCM API should be enabled or disabled. Note that the API is only used,
-         *                if the required class dependency is found, the Google Play Services are available
-         *                and this setting is {@code true}. The default value is {@code true}.
-         */
-        public void setGcmApiEnabled(boolean enabled) {
-            if (enabled == mGcmEnabled) {
-                return;
-            }
-
-            mGcmEnabled = enabled;
-            if (enabled) {
-                JobApi defaultApi = JobApi.getDefault(mContext, true);
-                if (!defaultApi.equals(getApi())) {
-                    setJobProxy(defaultApi);
-                    CAT.i("Changed default proxy to %s after enabled the GCM API", defaultApi);
-                }
-            } else {
-                JobApi defaultApi = JobApi.getDefault(mContext, false);
-                if (JobApi.GCM == getApi()) {
-                    setJobProxy(defaultApi);
-                    CAT.i("Changed default proxy to %s after disabling the GCM API", defaultApi);
-                }
-            }
-        }
-
-        /**
-         * Checks whether a smaller interval and flex are allowed for periodic jobs. That's helpful
-         * for testing purposes.
-         *
-         * @return Whether a smaller interval and flex than the minimum values are allowed for periodic jobs
-         * are allowed. The default value is {@code false}.
-         */
-        public boolean isAllowSmallerIntervalsForMarshmallow() {
-            return mAllowSmallerIntervals && Build.VERSION.SDK_INT < Build.VERSION_CODES.N;
-        }
-
-        /**
-         * Option to override the minimum period and minimum flex for periodic jobs. This is useful for testing
-         * purposes. This method only works for Android M and earlier. Later versions throw an exception.
-         *
-         * @param allowSmallerIntervals Whether a smaller interval and flex than the minimum values are allowed
-         *                              for periodic jobs are allowed. The default value is {@code false}.
-         */
-        public void setAllowSmallerIntervalsForMarshmallow(boolean allowSmallerIntervals) {
-            if (allowSmallerIntervals && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                throw new IllegalStateException("This method is only allowed to call on Android M or earlier");
-            }
-            mAllowSmallerIntervals = allowSmallerIntervals;
-        }
+    /*package*/ JobProxy getJobProxy(JobApi api) {
+        return api.getProxy(mContext);
     }
 
     private static void sendAddJobCreatorIntent(@NonNull Context context) {
+        final String myPackage = context.getPackageName();
+
         Intent intent = new Intent(JobCreator.ACTION_ADD_JOB_CREATOR);
-        List<ResolveInfo> resolveInfos = context.getPackageManager().queryBroadcastReceivers(intent, 0);
-        String myPackage = context.getPackageName();
+        intent.setPackage(myPackage);
+
+        List<ResolveInfo> resolveInfos;
+        try {
+            resolveInfos = context.getPackageManager().queryBroadcastReceivers(intent, 0);
+        } catch (Exception e) {
+            // just in case this crashes, skip the intent, most apps don't use this mechanism anyways
+            // this also prevents crash loops (package manager has died)
+            resolveInfos = Collections.emptyList();
+        }
 
         for (ResolveInfo resolveInfo : resolveInfos) {
             ActivityInfo activityInfo = resolveInfo.activityInfo;

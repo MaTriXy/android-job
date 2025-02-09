@@ -4,10 +4,9 @@ import android.content.Context;
 import android.os.Looper;
 import android.os.NetworkOnMainThreadException;
 import android.os.SystemClock;
-import android.support.annotation.NonNull;
-import android.support.annotation.WorkerThread;
-
-import net.vrallev.android.cat.Cat;
+import androidx.annotation.NonNull;
+import androidx.annotation.WorkerThread;
+import android.util.Log;
 
 import java.io.File;
 import java.io.IOException;
@@ -20,7 +19,7 @@ import java.util.Locale;
  */
 public class DemoSyncEngine {
 
-    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault());
+    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
 
     private final Context mContext;
 
@@ -60,7 +59,7 @@ public class DemoSyncEngine {
         try {
             FileUtils.writeFile(getSuccessFile(), text, true);
         } catch (IOException e) {
-            Cat.e(e);
+            Log.e("Demo", e.getMessage(), e);
         }
     }
 

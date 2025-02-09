@@ -1,27 +1,17 @@
 /*
- * Copyright 2007-present Evernote Corporation.
- * All rights reserved.
+ * Copyright (C) 2018 Evernote Corporation
  *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
+ *       http://www.apache.org/licenses/LICENSE-2.0
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
- * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
- * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package com.evernote.android.job.util;
 
@@ -30,12 +20,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.PowerManager;
-import android.support.annotation.NonNull;
-import android.support.v4.net.ConnectivityManagerCompat;
+import androidx.annotation.NonNull;
+import androidx.annotation.RestrictTo;
+import androidx.core.net.ConnectivityManagerCompat;
 
 import com.evernote.android.job.JobRequest;
 
@@ -44,6 +36,7 @@ import com.evernote.android.job.JobRequest;
  *
  * @author rwondratschek
  */
+@RestrictTo(RestrictTo.Scope.LIBRARY)
 public final class Device {
 
     private Device() {
@@ -51,18 +44,24 @@ public final class Device {
     }
 
     @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
-    public static boolean isCharging(Context context) {
+    public static BatteryStatus getBatteryStatus(Context context) {
         Intent intent = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         if (intent == null) {
             // should not happen
-            return false;
+            return BatteryStatus.DEFAULT;
         }
+
+        int level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+        int scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+        float batteryPct = level / (float) scale;
 
         // 0 is on battery
         int plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
-        return plugged == BatteryManager.BATTERY_PLUGGED_AC
+        boolean charging = plugged == BatteryManager.BATTERY_PLUGGED_AC
                 || plugged == BatteryManager.BATTERY_PLUGGED_USB
                 || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && plugged == BatteryManager.BATTERY_PLUGGED_WIRELESS);
+
+        return new BatteryStatus(charging, batteryPct);
     }
 
     @SuppressWarnings("deprecation")
@@ -91,9 +90,16 @@ public final class Device {
      * @return The current network type of the device.
      */
     @NonNull
+    @SuppressWarnings("deprecation")
     public static JobRequest.NetworkType getNetworkType(@NonNull Context context) {
         ConnectivityManager connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-        NetworkInfo networkInfo = connectivityManager.getActiveNetworkInfo();
+        NetworkInfo networkInfo;
+        try {
+            networkInfo = connectivityManager.getActiveNetworkInfo();
+        } catch (Throwable t) {
+            return JobRequest.NetworkType.ANY;
+        }
+
         if (networkInfo == null || !networkInfo.isConnectedOrConnecting()) {
             return JobRequest.NetworkType.ANY;
         }
@@ -103,10 +109,29 @@ public final class Device {
             return JobRequest.NetworkType.UNMETERED;
         }
 
-        if (networkInfo.isRoaming()) {
+        if (isRoaming(connectivityManager, networkInfo)) {
             return JobRequest.NetworkType.CONNECTED;
         } else {
             return JobRequest.NetworkType.NOT_ROAMING;
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static boolean isRoaming(ConnectivityManager connectivityManager, NetworkInfo networkInfo) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return networkInfo.isRoaming();
+        }
+
+        try {
+            NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(connectivityManager.getActiveNetwork());
+            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING);
+        } catch (Exception e) {
+            return networkInfo.isRoaming();
+        }
+    }
+
+    public static boolean isStorageLow() {
+        // figure this out
+        return false;
     }
 }

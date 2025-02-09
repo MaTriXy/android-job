@@ -6,7 +6,6 @@ import org.junit.FixMethodOrder;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.MethodSorters;
-import org.robolectric.RuntimeEnvironment;
 
 import java.io.File;
 import java.util.Set;
@@ -33,11 +32,31 @@ public class DatabaseExistingTest extends BaseJobManagerTest {
         testDatabase("evernote_jobs_v2.db");
     }
 
+    @Test
+    public void upgradeFromV3() {
+        testDatabase("evernote_jobs_v3.db");
+    }
+
+    @Test
+    public void upgradeFromV4() {
+        testDatabase("evernote_jobs_v4.db");
+    }
+
+    @Test
+    public void upgradeFromV5() {
+        testDatabase("evernote_jobs_v5.db");
+    }
+
+    @Test
+    public void upgradeFromV6() {
+        testDatabase("evernote_jobs_v6.db");
+    }
+
     private void testDatabase(String name) {
         String filePath = getClass().getResource("/databases/" + name).getPath();
         assertThat(new File(filePath).exists()).isTrue();
 
-        JobStorage storage = new JobStorage(RuntimeEnvironment.application, filePath);
+        JobStorage storage = new JobStorage(context(), filePath);
 
         Set<JobRequest> requests = storage.getAllJobRequests("tag", true);
         assertThat(requests).hasSize(30);
@@ -60,9 +79,9 @@ public class DatabaseExistingTest extends BaseJobManagerTest {
         assertThat(oneOff).isEqualTo(10);
         assertThat(periodic).isEqualTo(10);
 
-        // none of them should be transient
+        // none of them should be started
         for (JobRequest request : requests) {
-            assertThat(request.isTransient()).isFalse();
+            assertThat(request.isStarted()).isFalse();
         }
 
         for (JobRequest request : requests) {
@@ -72,6 +91,7 @@ public class DatabaseExistingTest extends BaseJobManagerTest {
 
             assertThat(request.getIntervalMs()).isGreaterThanOrEqualTo(JobRequest.MIN_INTERVAL);
             assertThat(request.getFlexMs()).isGreaterThanOrEqualTo(JobRequest.MIN_FLEX);
+            assertThat(request.getLastRun()).isEqualTo(0);
         }
     }
 }
